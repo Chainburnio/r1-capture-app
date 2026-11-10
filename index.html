@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=240, height=282, initial-scale=1, user-scalable=no">
+<title>Capture</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- LIST VIEW -->
+  <section id="view-list" class="view active">
+    <header class="bar">
+      <span class="title">Capture</span>
+      <span id="net" class="net" title="connection"></span>
+      <button id="btn-sync" class="icon-btn" aria-label="Sync now">⟳</button>
+      <button id="btn-settings" class="icon-btn" aria-label="Settings">⚙</button>
+    </header>
+    <nav class="tabs" id="tabs">
+      <button data-f="all" class="on">All</button>
+      <button data-f="task">Tasks</button>
+      <button data-f="event">Events</button>
+      <button data-f="note">Notes</button>
+    </nav>
+    <ul id="list"></ul>
+    <div id="empty" class="empty">Hold the side button and talk.<br>Say "task", "event" or "note" first if you want to be exact.</div>
+    <footer class="bar foot">
+      <span id="summary" class="summary"></span>
+      <button id="btn-type" class="pill">+ Type</button>
+    </footer>
+  </section>
+
+  <!-- DETAIL VIEW -->
+  <section id="view-detail" class="view">
+    <header class="bar">
+      <button class="icon-btn back" data-back>‹</button>
+      <span class="title" id="d-status"></span>
+    </header>
+    <div class="detail-body">
+      <div class="kinds" id="d-kinds">
+        <button data-k="task">Task</button>
+        <button data-k="event">Event</button>
+        <button data-k="note">Note</button>
+      </div>
+      <div id="d-title" class="d-title"></div>
+      <div id="d-when" class="d-when"></div>
+      <div id="d-text" class="d-text"></div>
+      <div id="d-err" class="d-err"></div>
+    </div>
+    <footer class="bar foot">
+      <button id="d-delete" class="pill danger">Delete</button>
+      <button id="d-send" class="pill">Send</button>
+    </footer>
+  </section>
+
+  <!-- TYPE VIEW -->
+  <section id="view-type" class="view">
+    <header class="bar">
+      <button class="icon-btn back" data-back>‹</button>
+      <span class="title">New entry</span>
+    </header>
+    <div class="type-body">
+      <div class="kinds" id="t-kinds">
+        <button data-k="auto" class="on">Auto</button>
+        <button data-k="task">Task</button>
+        <button data-k="event">Event</button>
+        <button data-k="note">Note</button>
+      </div>
+      <textarea id="t-text" placeholder="Type it…"></textarea>
+    </div>
+    <footer class="bar foot">
+      <span></span>
+      <button id="t-save" class="pill">Save</button>
+    </footer>
+  </section>
+
+  <!-- SETTINGS VIEW -->
+  <section id="view-settings" class="view">
+    <header class="bar">
+      <button class="icon-btn back" data-back>‹</button>
+      <span class="title">Settings</span>
+    </header>
+    <div class="settings-body">
+      <button id="s-scan" class="pill wide">Scan setup QR</button>
+      <video id="s-video" playsinline muted></video>
+      <label>GitHub owner<input id="s-owner" autocomplete="off"></label>
+      <label>Repo<input id="s-repo" autocomplete="off"></label>
+      <label>Branch<input id="s-branch" autocomplete="off"></label>
+      <label>Folder in repo (blank = top)<input id="s-folder" autocomplete="off"></label>
+      <label>GitHub token<input id="s-gh" type="password" autocomplete="off"></label>
+      <label>Groq key<input id="s-groq" type="password" autocomplete="off"></label>
+      <label class="check"><input id="s-auto" type="checkbox"> Send to vault automatically</label>
+      <button id="s-save" class="pill wide">Save</button>
+      <button id="s-test" class="pill wide">Test connection</button>
+      <div id="s-msg" class="s-msg"></div>
+    </div>
+  </section>
+
+  <!-- RECORDING OVERLAY -->
+  <div id="rec" class="rec">
+    <div class="rec-dot"></div>
+    <div id="rec-time">0:00</div>
+    <div class="rec-hint">Release to save</div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
