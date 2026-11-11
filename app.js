@@ -3,7 +3,7 @@
 (() => {
 'use strict';
 
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
 const IS_R1 = typeof window.PluginMessageHandler !== 'undefined';
@@ -258,7 +258,7 @@ const ghBase = () => `https://api.github.com/repos/${encodeURIComponent(cfg.owne
 const ghHeaders = () => ({ Authorization: 'Bearer ' + cfg.gh, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' });
 const encPath = (p) => p.split('/').filter(Boolean).map(encodeURIComponent).join('/');
 const fileFor = (it) => {
-  const name = mdy(it.created.slice(0, 10)) + '.md';
+  const name = mdy(isoDate(new Date(it.created))) + '.md';   // local date, not UTC
   const folder = (cfg.folder || '').replace(/^\/+|\/+$/g, '');
   return folder ? `${folder}/${name}` : name;
 };
@@ -282,13 +282,17 @@ function lineFor(it) {
   const tag = ` ^r1-${it.id}`;
   const capT = new Date(it.created);
   const capClock = clock(`${pad(capT.getHours())}:${pad(capT.getMinutes())}`);
+  // Formats match the vault: Tasks plugin (global filter #task, emoji dates) and the
+  // Dataview calendar (list items with [date:: YYYY-MM-DD] and optional [time:: ...]).
   if (it.kind === 'task') {
-    const due = it.date ? ` (due ${mdy(it.date)}${it.time ? ' ' + clock(it.time) : ''})` : '';
-    return `- [${it.done ? 'x' : ' '}] ${it.title}${due}${tag}`;
+    const at = it.time ? ` at ${clock(it.time)}` : '';
+    const due = it.date ? ` 📅 ${it.date}` : '';
+    const doneOn = it.done && it.doneAt ? ` ✅ ${isoDate(new Date(it.doneAt))}` : '';
+    return `- [${it.done ? 'x' : ' '}] #task ${it.title}${at}${due}${doneOn}${tag}`;
   }
   if (it.kind === 'event') {
-    const when = [mdy(it.date), clock(it.time)].filter(Boolean).join(' ') || 'Date not given';
-    return `- ${when}: ${it.title}${tag}`;
+    if (!it.date) return `- ${it.title} (no date given)${tag}`;
+    return `- ${it.title} [date:: ${it.date}]${it.time ? ` [time:: ${clock(it.time)}]` : ''}${tag}`;
   }
   return `- ${capClock} ${it.text || it.title}${tag}`;
 }
@@ -405,7 +409,7 @@ async function syncItems(list) {
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const { text, sha } = await ghGet(path);
-        let out = text == null ? newFile(group[0].created.slice(0, 10)) : text;
+        let out = text == null ? newFile(isoDate(new Date(group[0].created))) : text;
         group.forEach((it) => { out = insertLine(out, it); });
         if (out !== text) await ghPut(path, out, sha, `r1: add ${group.length} item${group.length > 1 ? 's' : ''}`);
         const now = new Date().toISOString();
