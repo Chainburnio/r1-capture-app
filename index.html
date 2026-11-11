@@ -164,7 +164,9 @@
       <span class="title">Settings</span>
     </header>
     <div class="settings-body">
-      <button id="s-scan" class="pill wide">Scan setup QR</button>
+      <label>Setup code (from the setup page)<input id="s-code" autocomplete="off" autocapitalize="characters" placeholder="XXXXX-XXXXX"></label>
+      <button id="s-loadcode" class="pill wide">Load setup</button>
+      <button id="s-scan" class="pill ghost wide">Scan setup QR</button>
       <video id="s-video" playsinline muted></video>
       <label>GitHub owner<input id="s-owner" autocomplete="off"></label>
       <label>Repo<input id="s-repo" autocomplete="off"></label>

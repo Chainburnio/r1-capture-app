@@ -4,7 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Capture setup</title>
-<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
 <style>
   body { font: 15px/1.45 "Segoe UI", system-ui, sans-serif; max-width: 760px; margin: 30px auto; padding: 0 18px; color: #222; }
   h1 { font-size: 22px; } h2 { font-size: 17px; margin-top: 28px; }
@@ -12,57 +11,74 @@
   input[type=text], input[type=password] { width: 100%; padding: 7px 9px; border: 1px solid #bbb; border-radius: 6px; font: inherit; box-sizing: border-box; }
   .row { display: flex; gap: 12px; } .row > div { flex: 1; }
   button { margin-top: 14px; padding: 9px 16px; border: 0; border-radius: 6px; background: #ff5a1f; color: #111; font-weight: 700; cursor: pointer; }
-  .qrs { display: flex; gap: 30px; flex-wrap: wrap; margin-top: 18px; }
-  .qr { text-align: center; } .qr svg { width: 260px; height: 260px; }
   .note { font-size: 13px; color: #666; }
-  .warn { background: #fff4e5; border: 1px solid #f0c78a; padding: 8px 10px; border-radius: 6px; font-size: 13px; }
+  .out { display: none; margin-top: 18px; padding: 16px; border: 1px solid #ddd; border-radius: 10px; background: #fafafa; }
+  .code { font: 700 34px/1.2 Consolas, monospace; letter-spacing: 4px; margin: 6px 0 12px; }
+  ol li { margin: 4px 0; }
+  .err { color: #b00020; font-size: 13px; margin-top: 8px; }
 </style>
 </head>
 <body>
 <h1>Capture for rabbit r1: setup</h1>
-<p class="note">Everything on this page stays in this browser. Nothing is uploaded.</p>
+<p class="note">Your keys never leave this page unencrypted. This page makes a locked file (setup.json) and a short code. Only the code unlocks it, and the code is only shown here.</p>
 
-<h2>1. Where the app is hosted</h2>
-<label>App URL (your GitHub Pages address)</label>
-<input type="text" id="appUrl" placeholder="https://yourname.github.io/r1-capture/">
-
-<h2>2. Vault repo</h2>
+<h2>1. Vault repo</h2>
 <div class="row">
   <div><label>GitHub owner</label><input type="text" id="owner" placeholder="yourname"></div>
-  <div><label>Repo</label><input type="text" id="repo" value="r1-inbox"></div>
+  <div><label>Repo</label><input type="text" id="repo" value="r1-capture"></div>
 </div>
 <div class="row">
   <div><label>Branch</label><input type="text" id="branch" value="main"></div>
   <div><label>Folder in repo (leave blank)</label><input type="text" id="folder" value=""></div>
 </div>
-<label>GitHub fine-grained token (Contents: read and write, this repo only)</label>
+<label>GitHub fine-grained token</label>
 <input type="password" id="gh" placeholder="github_pat_...">
 
-<h2>3. Voice to text</h2>
+<h2>2. Voice to text</h2>
 <label>Groq API key</label>
 <input type="password" id="groq" placeholder="gsk_...">
 <label style="font-weight:400"><input type="checkbox" id="auto" checked> Send to vault automatically when ready</label>
 
-<button id="go">Make QR codes</button>
+<button id="go">Make setup code</button>
+<div class="err" id="err"></div>
 
-<div class="qrs">
-  <div class="qr"><div id="qrInstall"></div><div><b>A. Install</b><br><span class="note">Scan with the r1 to add the creation</span></div></div>
-  <div class="qr"><div id="qrConfig"></div><div><b>B. Settings</b><br><span class="note">In the app: ⚙ → Scan setup QR</span></div></div>
+<div class="out" id="out">
+  <div>Your setup code:</div>
+  <div class="code" id="code"></div>
+  <ol>
+    <li>Your browser just downloaded <b>setup.json</b>. Upload it to the <b>r1-capture-app</b> repo (Add file → Upload files → Commit changes).</li>
+    <li>Wait about a minute, then on the r1 open Capture → ⚙ → type the code into <b>Setup code</b> → <b>Load setup</b>.</li>
+    <li>When it says GitHub: OK · Groq: OK, delete setup.json from the repo and close this page.</li>
+  </ol>
+  <p class="note">The file is encrypted with the code (PBKDF2 + AES-256). Without the code it is unreadable.</p>
 </div>
-<p class="warn" id="warn" style="display:none">QR B contains your keys. Close this page when you're done and don't screenshot or share it.</p>
 
 <script>
 const $ = (id) => document.getElementById(id);
-function qrSvg(text) { const q = qrcode(0, 'M'); q.addData(text); q.make(); return q.createSvgTag({ cellSize: 6, margin: 2, scalable: true }); }
-$('go').onclick = () => {
-  let url = $('appUrl').value.trim();
-  if (url && !url.endsWith('/') && !url.endsWith('.html')) url += '/';
-  const install = { title: 'Capture', url, description: 'Voice tasks, events and notes to Obsidian', iconUrl: '', themeColor: '#FF5A1F' };
+(() => {
+  const q = new URLSearchParams(location.search);
+  ['owner', 'repo', 'branch', 'folder'].forEach((k) => { if (q.get(k) !== null) $(k).value = q.get(k); });
+})();
+const ALPHA = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O or 1/I/L confusion
+const ITER = 300000;
+const b64 = (u8) => { let s = ''; u8.forEach((b) => { s += String.fromCharCode(b); }); return btoa(s); };
+$('go').onclick = async () => {
+  $('err').textContent = '';
   const cfg = { app: 'r1-capture', owner: $('owner').value.trim(), repo: $('repo').value.trim(), branch: $('branch').value.trim() || 'main',
     folder: $('folder').value.trim(), gh: $('gh').value.trim(), groq: $('groq').value.trim(), auto: $('auto').checked };
-  $('qrInstall').innerHTML = url ? qrSvg(JSON.stringify(install)) : '<p class="note">Add the app URL first</p>';
-  $('qrConfig').innerHTML = qrSvg(JSON.stringify(cfg));
-  $('warn').style.display = 'block';
+  if (!cfg.owner || !cfg.repo || !cfg.gh || !cfg.groq) { $('err').textContent = 'Fill in the owner, repo, token and Groq key first.'; return; }
+  const rnd = crypto.getRandomValues(new Uint8Array(10));
+  const code = Array.from(rnd, (b) => ALPHA[b % 32]).join('');
+  const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(code), 'PBKDF2', false, ['deriveKey']);
+  const key = await crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: ITER, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt']);
+  const data = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(cfg))));
+  const file = JSON.stringify({ v: 1, iter: ITER, salt: b64(salt), iv: b64(iv), data: b64(data) });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([file], { type: 'application/json' })); a.download = 'setup.json'; a.click();
+  $('code').textContent = code.slice(0, 5) + '-' + code.slice(5);
+  $('out').style.display = 'block';
+  $('gh').value = ''; $('groq').value = '';
 };
 </script>
 </body>

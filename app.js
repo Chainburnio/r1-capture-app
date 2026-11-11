@@ -3,7 +3,7 @@
 (() => {
 'use strict';
 
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
 const IS_R1 = typeof window.PluginMessageHandler !== 'undefined';
@@ -993,6 +993,30 @@ function applySetupPayload(raw) {
   if (typeof j.auto === 'boolean') cfg.auto = j.auto;
   return true;
 }
+/* setup code: the setup page encrypts the settings into setup.json (published next to the app);
+   the short code typed here is the key. Nothing secret travels in the clear. */
+function unb64(s) { const b = atob(s); const a = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) a[i] = b.charCodeAt(i); return a; }
+async function loadSetupCode() {
+  const msg = $('#s-msg');
+  const code = $('#s-code').value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (code.length !== 10) { msg.textContent = 'The code is 10 letters and numbers, like ABCDE-23456.'; return; }
+  msg.textContent = 'Loading…';
+  try {
+    const r = await fetch('setup.json?t=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) { msg.textContent = r.status === 404 ? 'setup.json is not uploaded yet (or not live). Wait a minute and try again.' : `Could not load setup (${r.status})`; return; }
+    const j = await r.json();
+    const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(code), 'PBKDF2', false, ['deriveKey']);
+    const key = await crypto.subtle.deriveKey({ name: 'PBKDF2', salt: unb64(j.salt), iterations: j.iter, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+    let plain;
+    try { plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(j.iv) }, key, unb64(j.data)); }
+    catch { msg.textContent = 'That code does not match. Check it and try again.'; return; }
+    if (!applySetupPayload(new TextDecoder().decode(plain))) { msg.textContent = 'Setup file is not valid.'; return; }
+    await saveCfg(); fillSettings(); $('#s-code').value = '';
+    msg.textContent = 'Setup loaded and saved. Testing…';
+    await testConnection();
+    runPipeline();
+  } catch (e) { msg.textContent = isNetErr(e) ? 'No connection. Connect to Wi-Fi and try again.' : 'Setup failed: ' + e.message; }
+}
 let scanStream = null, scanLoop = null;
 async function startScan() {
   if (!('BarcodeDetector' in window)) { $('#s-msg').textContent = 'QR scanning is not supported here. Type the values instead.'; return; }
@@ -1135,6 +1159,8 @@ function wire() {
   $('#s-save').onclick = async () => { readSettings(); await saveCfg(); $('#s-msg').textContent = 'Saved.'; runPipeline(); };
   $('#s-test').onclick = testConnection;
   $('#s-scan').onclick = () => (scanStream ? stopScan() : startScan());
+  if (IS_R1) $('#s-scan').style.display = 'none'; // live camera crashes creations on the r1; use the setup code
+  $('#s-loadcode').onclick = loadSetupCode;
 
   window.addEventListener('online', () => { setNet(); runPipeline(); });
   window.addEventListener('offline', setNet);
