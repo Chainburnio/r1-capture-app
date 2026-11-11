@@ -3,7 +3,7 @@
 (() => {
 'use strict';
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
 const IS_R1 = typeof window.PluginMessageHandler !== 'undefined';
@@ -41,17 +41,23 @@ const store = {
 
 /* ---------- state ---------- */
 let items = [];          // newest first
-let cfg = { owner: '', repo: '', branch: 'main', folder: '', gh: '', groq: '', auto: true };
+let cfg = { owner: '', repo: '', branch: 'main', folder: '', gh: '', groq: '', auto: true,
+  habits: ['Workout', 'Eat well', 'Work done'], oneThing: true };
+let days = {};           // 'YYYY-MM-DD' -> { habits: {name: true}, one: {id, done: true|false|null}, dirty }
 let filter = 'all';
 let sel = 0;
 let detailId = null;
 let typeKind = 'auto';
+let typeMode = 'entry';  // 'entry' | 'one'
+let recForOne = false;
+let focusIdx = -1;       // scroll-wheel focus on the Today screen
 let busy = false;
 
 const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
 async function loadState() {
   try { items = JSON.parse(await store.get('items') || '[]'); } catch { items = []; }
+  try { days = JSON.parse(await store.get('days') || '{}'); } catch { days = {}; }
   try { Object.assign(cfg, JSON.parse(await store.get('cfg') || '{}')); } catch {}
   cfg.gh = (await store.get('gh', true)) || cfg.gh || '';
   cfg.groq = (await store.get('groq', true)) || cfg.groq || '';
@@ -59,6 +65,18 @@ async function loadState() {
   items.forEach((it) => { if (it.status === 'processing') it.status = it.kind ? 'ready' : 'recorded'; });
 }
 const saveItems = () => store.set('items', JSON.stringify(items));
+const saveDays = () => {
+  // keep about two months of day records on the device; the vault keeps everything
+  const keys = Object.keys(days).sort();
+  keys.slice(0, Math.max(0, keys.length - 60)).forEach((k) => delete days[k]);
+  return store.set('days', JSON.stringify(days));
+};
+const todayKey = () => isoDate(new Date());
+function day(key = todayKey()) {
+  if (!days[key]) days[key] = { habits: {}, one: null, dirty: false };
+  return days[key];
+}
+const markDay = (key = todayKey()) => { day(key).dirty = true; };
 async function saveCfg() {
   const { gh, groq, ...plain } = cfg;
   await store.set('cfg', JSON.stringify(plain));
@@ -264,10 +282,11 @@ function lineFor(it) {
   return `- ${capClock} ${it.text || it.title}${tag}`;
 }
 function newFile(dateISO) {
-  return `---\nsource: r1\ndate: ${mdy(dateISO)}\n---\n\n## Tasks\n\n## Events\n\n## Notes\n`;
+  return `---\nsource: r1\ndate: ${mdy(dateISO)}\n---\n\n## Day\n\n## Tasks\n\n## Events\n\n## Notes\n`;
 }
 function insertLine(text, it) {
-  if (text.includes(`^r1-${it.id}`)) return text;            // already there
+  const tagRe = new RegExp(`^.*\\^r1-${it.id}[ \\t]*$`, 'm');
+  if (tagRe.test(text)) return text.replace(tagRe, lineFor(it)); // already there: keep it current (e.g. checked off)
   const heading = SECTIONS[it.kind];
   const lines = text.replace(/\s+$/, '').split('\n');
   let h = lines.findIndex((l) => l.trim() === heading);
@@ -279,6 +298,91 @@ function insertLine(text, it) {
   lines.splice(at, 0, lineFor(it));
   return lines.join('\n') + '\n';
 }
+/* ----- the "## Day" wrap-up section, rewritten each time the day changes ----- */
+const habitKey = (h) => h.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+const itemsOn = (key) => items.filter((i) => i.created && isoDate(new Date(i.created)) === key);
+function nextEventAfter(key) {
+  const now = new Date(); const nowKey = isoDate(now); const nowT = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  return items.filter((i) => i.kind === 'event' && i.date && (i.date > key || (i.date === key && key === nowKey && (i.time || '99') >= nowT)))
+    .sort((a, b) => (a.date + (a.time || '99')).localeCompare(b.date + (b.time || '99')))[0] || null;
+}
+function daySummary(key) {
+  const d = day(key); const its = itemsOn(key);
+  const lines = [];
+  if (d.one) {
+    const it = items.find((i) => i.id === d.one.id);
+    const what = it ? (it.title || it.text || 'Voice memo') : 'Set by voice';
+    const st = d.one.done === true ? 'done' : d.one.done === false ? 'not today' : 'open';
+    lines.push(`- One thing: ${what} (${st})`);
+  }
+  const hs = (cfg.habits || []).filter(Boolean);
+  if (hs.length) {
+    const yes = hs.filter((h) => d.habits[h]); const no = hs.filter((h) => !d.habits[h]);
+    lines.push(`- Habits: ${yes.length ? 'did ' + yes.join(', ') : 'none logged'}${no.length && yes.length ? '; skipped ' + no.join(', ') : ''}`);
+  }
+  const n = (k) => its.filter((i) => i.kind === k).length;
+  if (its.length) {
+    const doneT = items.filter((i) => i.kind === 'task' && i.doneAt && isoDate(new Date(i.doneAt)) === key).length;
+    const pl = (c, w) => `${c} ${w}${c === 1 ? '' : 's'}`;
+    lines.push(`- Captured ${its.length}: ${pl(n('task'), 'task')}, ${pl(n('event'), 'event')}, ${pl(n('note'), 'note')}${doneT ? `; ${pl(doneT, 'task')} done` : ''}`);
+  }
+  const nx = nextEventAfter(key);
+  if (nx) lines.push(`- Next up: ${[mdy(nx.date), clock(nx.time)].filter(Boolean).join(' ')} ${nx.title}`);
+  return lines.length ? lines.join('\n') : '- Nothing logged';
+}
+function setFrontmatter(text, fields) {
+  const m = text.match(/^---\n([\s\S]*?)\n---\n?/);
+  let fm = m ? m[1].split('\n') : [];
+  for (const [k, v] of Object.entries(fields)) {
+    const idx = fm.findIndex((l) => l.startsWith(k + ':'));
+    if (v === undefined) { if (idx >= 0) fm.splice(idx, 1); continue; }
+    const line = `${k}: ${v}`;
+    if (idx >= 0) fm[idx] = line; else fm.push(line);
+  }
+  const block = `---\n${fm.join('\n')}\n---\n`;
+  return m ? block + text.slice(m[0].length) : block + '\n' + text;
+}
+function upsertDay(text, key) {
+  const d = day(key);
+  const fields = {};
+  (cfg.habits || []).filter(Boolean).forEach((h) => { fields[habitKey(h)] = !!d.habits[h]; });
+  fields.one_thing_done = d.one && d.one.done !== null && d.one.done !== undefined ? d.one.done : undefined;
+  let out = setFrontmatter(text, fields);
+  const lines = out.replace(/\s+$/, '').split('\n');
+  let h = lines.findIndex((l) => l.trim() === '## Day');
+  if (h < 0) {
+    let fmEnd = 0;
+    if (lines[0] === '---') { fmEnd = lines.indexOf('---', 1) + 1; }
+    lines.splice(fmEnd, 0, '', '## Day'); h = fmEnd + 1;
+  }
+  let end = lines.length;
+  for (let i = h + 1; i < lines.length; i++) if (/^#{1,6}\s/.test(lines[i])) { end = i; break; }
+  lines.splice(h + 1, end - (h + 1), ...daySummary(key).split('\n'), '');
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n') + '\n';
+}
+const pathForDate = (key) => {
+  const folder = (cfg.folder || '').replace(/^\/+|\/+$/g, '');
+  return (folder ? folder + '/' : '') + mdy(key) + '.md';
+};
+async function syncDays() {
+  for (const key of Object.keys(days).filter((k) => days[k].dirty).sort()) {
+    const path = pathForDate(key);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const { text, sha } = await ghGet(path);
+        const out = upsertDay(text == null ? newFile(key) : text, key);
+        if (out !== text) await ghPut(path, out, sha, `r1: day summary ${mdy(key)}`);
+        days[key].dirty = false;
+        break;
+      } catch (e) {
+        if ((e.status === 409 || e.status === 422) && attempt < 2) continue;
+        throw e;
+      }
+    }
+    await saveDays();
+  }
+}
+
 async function syncItems(list) {
   const groups = {};
   list.forEach((it) => { (groups[fileFor(it)] = groups[fileFor(it)] || []).push(it); });
@@ -290,7 +394,7 @@ async function syncItems(list) {
         group.forEach((it) => { out = insertLine(out, it); });
         if (out !== text) await ghPut(path, out, sha, `r1: add ${group.length} item${group.length > 1 ? 's' : ''}`);
         const now = new Date().toISOString();
-        group.forEach((it) => { it.status = 'synced'; it.syncedAt = now; it.error = ''; });
+        group.forEach((it) => { it.status = 'synced'; it.syncedAt = now; it.error = ''; markDay(isoDate(new Date(it.created))); });
         break;
       } catch (e) {
         if ((e.status === 409 || e.status === 422) && attempt < 2) continue; // file changed under us; re-read
@@ -338,6 +442,10 @@ async function runPipeline(manual = false) {
       const ready = items.filter((i) => i.status === 'ready' || (manual && i.status === 'error' && i.kind));
       if (ready.length) await sendToVault(ready);
     }
+    // 3. day wrap-up section (habits, one thing, counts) -> vault
+    if (cfg.gh && cfg.owner && cfg.repo && Object.values(days).some((d) => d.dirty)) {
+      try { await syncDays(); } catch (e) { if (!isNetErr(e)) toast(e.message); }
+    }
   } finally { busy = false; setNet(); render(); }
 }
 async function sendToVault(list) {
@@ -357,7 +465,8 @@ function pickMime() {
   return (window.MediaRecorder && opts.find((m) => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m))) || '';
 }
 async function startRec() {
-  if (rec || !currentViewIs('list')) return;
+  if (rec || !(currentViewIs('list') || currentViewIs('today') || currentViewIs('week') || (currentViewIs('type') && typeMode === 'one'))) return;
+  recForOne = currentViewIs('type') && typeMode === 'one';
   try {
     recStream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (e) { toast('Microphone not available: ' + (e.message || e.name)); return; }
@@ -387,11 +496,117 @@ async function finishRec() {
   const blob = new Blob(recChunks, { type: mime });
   const b64 = await new Promise((res) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(',')[1]); fr.readAsDataURL(blob); });
   const it = { id: newId(), created: new Date().toISOString(), status: 'recorded', mime, text: '', kind: '', title: '', date: '', time: '' };
+  if (recForOne) { it.forceKind = 'task'; it.kind = 'task'; it.title = "Today's one thing"; }
   await store.set('audio_' + it.id, b64);
   items.unshift(it); filter = 'all'; sel = 0;
+  if (recForOne) { setOneThing(it); recForOne = false; show('today'); }
   await saveItems(); render();
   toast(navigator.onLine ? 'Saved. Processing…' : 'Saved offline');
   runPipeline();
+}
+
+/* ---------- daily loop ---------- */
+function setOneThing(it) {
+  const d = day(); d.one = { id: it.id, done: null }; it.oneThing = todayKey();
+  markDay(); saveDays();
+}
+function oneThingItem(key = todayKey()) {
+  const d = days[key]; if (!d || !d.one) return null;
+  return items.find((i) => i.id === d.one.id) || null;
+}
+async function answerOne(done) {
+  const d = day(); if (!d.one) return;
+  d.one.done = done;
+  const it = oneThingItem();
+  if (it) setDone(it, done, false);
+  markDay(); await saveDays(); await saveItems(); renderToday(); runPipeline();
+}
+function setDone(it, done, save = true) {
+  it.done = !!done; it.doneAt = done ? new Date().toISOString() : null;
+  if (it.status === 'synced') it.status = 'ready';   // push the checkbox change to the vault
+  markDay(isoDate(new Date(it.created)));
+  if (it.oneThing && days[it.oneThing] && days[it.oneThing].one && days[it.oneThing].one.id === it.id) {
+    days[it.oneThing].one.done = done ? true : null;
+  }
+  if (save) { saveItems(); saveDays(); }
+}
+async function toggleHabit(name) {
+  const d = day(); d.habits[name] = !d.habits[name];
+  if (!d.habits[name]) delete d.habits[name];
+  markDay(); await saveDays(); renderToday();
+  clearTimeout(toggleHabit.t); toggleHabit.t = setTimeout(() => runPipeline(), 4000); // batch quick taps
+}
+const isEvening = () => new Date().getHours() >= 17;
+const openTasks = () => items.filter((i) => i.kind === 'task' && !i.done);
+
+function renderToday() {
+  const now = new Date(); const key = todayKey(); const d = day(key);
+  $('#td-date').textContent = `${now.toLocaleDateString([], { weekday: 'short' })} ${mdy(key).slice(0, 5)}`;
+  // top card: agenda in the day, wrap-up in the evening
+  const top = $('#td-top'); const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const tasksN = openTasks().length;
+  if (isEvening()) {
+    const its = itemsOn(key);
+    const doneT = items.filter((i) => i.doneAt && isoDate(new Date(i.doneAt)) === key).length;
+    const nx = nextEventAfter(key);
+    top.innerHTML = `<div class="ln"><b>Wrap-up</b> · ${its.length} captured${doneT ? `, ${doneT} done` : ''}</div>` +
+      `<div class="ln ${nx ? '' : 'muted'}">${nx ? 'Next: ' + esc([nx.date === key ? '' : mdy(nx.date).slice(0, 5), clock(nx.time)].filter(Boolean).join(' ') + ' ' + nx.title) : 'Nothing scheduled next'}</div>`;
+  } else {
+    const evs = items.filter((i) => i.kind === 'event' && i.date === key).sort((a, b) => (a.time || '99').localeCompare(b.time || '99')).slice(0, 2);
+    top.innerHTML = (evs.length ? evs.map((e) => `<div class="ln">${esc(clock(e.time) || 'Today')} ${esc(e.title)}</div>`).join('') : '<div class="ln muted">No events today</div>') +
+      `<div class="ln muted">${tasksN} open task${tasksN === 1 ? '' : 's'}</div>`;
+  }
+  // one thing
+  const one = $('#td-one'); one.className = 'card one focusable';
+  if (!cfg.oneThing) { one.style.display = 'none'; }
+  else {
+    one.style.display = '';
+    const it = oneThingItem(key);
+    if (!d.one) {
+      one.classList.add('empty-one');
+      one.innerHTML = isEvening() ? 'No one thing today' : "Tap to set today's one thing";
+    } else {
+      const txt = it ? (it.status === 'recorded' || it.status === 'processing' ? 'Voice memo (converting)' : it.title) : '…';
+      if (d.one.done === true) one.classList.add('done-one');
+      const ask = isEvening() && d.one.done == null;
+      one.innerHTML = `<div class="lbl">One thing${d.one.done === true ? ' · done' : d.one.done === false ? ' · not today' : ''}</div><div class="txt"></div>` +
+        (ask ? '<div class="yn"><button class="yes" data-one="yes">Done</button><button data-one="no">Not today</button></div>' : '');
+      one.querySelector('.txt').textContent = txt;
+    }
+  }
+  // habits
+  const hb = $('#td-habits'); hb.innerHTML = '';
+  (cfg.habits || []).filter(Boolean).slice(0, 4).forEach((h) => {
+    const b = document.createElement('button'); b.className = 'focusable' + (d.habits[h] ? ' on' : '');
+    b.textContent = (d.habits[h] ? '✓ ' : '') + h; b.onclick = () => toggleHabit(h);
+    hb.appendChild(b);
+  });
+  applyFocus();
+}
+const focusables = () => $$('#view-today .focusable').filter((el) => el.offsetParent !== null);
+function applyFocus() {
+  const f = focusables(); f.forEach((el, i) => el.classList.toggle('focus', i === focusIdx));
+}
+function activateFocused() {
+  const el = focusables()[focusIdx]; if (el) el.click();
+}
+
+function renderWeek() {
+  const body = $('#wk-body'); body.innerHTML = '';
+  const keys = []; for (let i = 6; i >= 0; i--) { const t = new Date(); t.setDate(t.getDate() - i); keys.push(isoDate(t)); }
+  const row = (label, hits, of) => {
+    const r = document.createElement('div');
+    r.innerHTML = `<div class="wk-row"><span></span><span>${hits.filter(Boolean).length} of ${of}</span></div><div class="wk-dots">${hits.map((h) => `<i class="${h ? 'on' : ''}"></i>`).join('')}</div>`;
+    r.querySelector('span').textContent = label; body.appendChild(r);
+  };
+  (cfg.habits || []).filter(Boolean).slice(0, 4).forEach((h) => row(h, keys.map((k) => !!(days[k] && days[k].habits[h])), 7));
+  if (cfg.oneThing) {
+    const set = keys.filter((k) => days[k] && days[k].one);
+    row('One thing done', keys.map((k) => !!(days[k] && days[k].one && days[k].one.done === true)), set.length || 0);
+  }
+  const cap = keys.reduce((n, k) => n + itemsOn(k).length, 0);
+  const r = document.createElement('div'); r.className = 'wk-row'; r.innerHTML = '<span>Captured</span><span></span>';
+  r.lastChild.textContent = String(cap); body.appendChild(r);
 }
 
 /* ---------- UI ---------- */
@@ -426,6 +641,9 @@ function render() {
   $$('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.f === filter));
   const s = list.querySelector('.sel'); if (s) s.scrollIntoView({ block: 'nearest' });
   if (detailId && currentViewIs('detail')) fillDetail();
+  if (currentViewIs('today')) renderToday();
+  if (currentViewIs('week')) renderWeek();
+  const inb = $('#btn-inbox'); if (inb) inb.textContent = waiting + ready + err ? `Inbox · ${waiting + ready + err}` : 'Inbox';
 }
 function setNet() {
   const n = $('#net'); n.classList.toggle('on', navigator.onLine);
@@ -447,6 +665,9 @@ function fillDetail() {
   send.textContent = it.status === 'synced' ? 'Sent ✓' : it.status === 'error' ? 'Retry' : 'Send';
   send.disabled = it.status === 'synced' || it.status === 'processing';
   send.style.opacity = send.disabled ? .4 : 1;
+  const dn = $('#d-done');
+  dn.style.display = it.kind === 'task' ? '' : 'none';
+  dn.textContent = it.done ? 'Undo done' : 'Done';
 }
 
 let toastT = null;
@@ -455,17 +676,34 @@ function toast(msg) {
   clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), 2600);
 }
 
-function goBack() { show('list'); detailId = null; stopScan(); render(); }
+function goBack() {
+  const toList = currentViewIs('detail') || (currentViewIs('type') && typeMode === 'entry');
+  show(toList ? 'list' : 'today');
+  detailId = null; typeMode = 'entry'; stopScan(); focusIdx = -1; render();
+}
+function openType(mode) {
+  typeMode = mode; typeKind = 'auto'; $('#t-text').value = '';
+  const one = mode === 'one';
+  $('#t-title').textContent = one ? "Today's one thing" : 'New entry';
+  $('#t-hint').textContent = one ? 'Hold the side button and say it, or type it.' : '';
+  $('#t-kinds').style.display = one ? 'none' : '';
+  $$('#t-kinds button').forEach((x) => x.classList.toggle('on', x.dataset.k === 'auto'));
+  show('type');
+  if (!one) setTimeout(() => $('#t-text').focus(), 50);
+}
 
 /* ---------- settings + QR setup ---------- */
 function fillSettings() {
   $('#s-owner').value = cfg.owner; $('#s-repo').value = cfg.repo; $('#s-branch').value = cfg.branch || 'main';
   $('#s-folder').value = cfg.folder || ''; $('#s-gh').value = cfg.gh; $('#s-groq').value = cfg.groq; $('#s-auto').checked = !!cfg.auto;
+  $('#s-habits').value = (cfg.habits || []).join(', '); $('#s-one').checked = !!cfg.oneThing;
   $('#s-msg').textContent = `v${VERSION}${IS_R1 ? '' : ' · preview mode (not on r1)'}`;
 }
 function readSettings() {
   cfg.owner = $('#s-owner').value.trim(); cfg.repo = $('#s-repo').value.trim(); cfg.branch = $('#s-branch').value.trim() || 'main';
   cfg.folder = $('#s-folder').value.trim(); cfg.gh = $('#s-gh').value.trim(); cfg.groq = $('#s-groq').value.trim(); cfg.auto = $('#s-auto').checked;
+  cfg.habits = $('#s-habits').value.split(',').map((s) => s.trim()).filter(Boolean).slice(0, 4);
+  cfg.oneThing = $('#s-one').checked;
 }
 function applySetupPayload(raw) {
   let j; try { j = JSON.parse(raw); } catch { return false; }
@@ -513,11 +751,13 @@ async function testConnection() {
 
 /* ---------- input wiring ---------- */
 function moveSel(d) {
-  if (currentViewIs('list')) { const n = visible().length; if (!n) return; sel = Math.min(n - 1, Math.max(0, sel + d)); render(); }
+  if (currentViewIs('today')) { const n = focusables().length; if (!n) return; focusIdx = focusIdx < 0 ? (d > 0 ? 0 : n - 1) : Math.min(n - 1, Math.max(0, focusIdx + d)); applyFocus(); }
+  else if (currentViewIs('list')) { const n = visible().length; if (!n) return; sel = Math.min(n - 1, Math.max(0, sel + d)); render(); }
   else { const body = document.querySelector('.view.active .detail-body, .view.active .settings-body, .view.active .type-body'); if (body) body.scrollTop += d * 40; }
 }
 function sideClick() {
-  if (currentViewIs('list')) { const it = visible()[sel]; if (it) openDetail(it.id); }
+  if (currentViewIs('today')) { if (focusIdx >= 0) activateFocused(); }
+  else if (currentViewIs('list')) { const it = visible()[sel]; if (it) openDetail(it.id); }
   else if (!currentViewIs('type')) goBack();
 }
 
@@ -543,11 +783,25 @@ function wire() {
   $$('#tabs button').forEach((b) => b.onclick = () => { filter = b.dataset.f; sel = 0; render(); });
   $('#btn-settings').onclick = () => { fillSettings(); show('settings'); };
   $('#btn-sync').onclick = () => { toast('Syncing…'); runPipeline(true); };
-  $('#btn-type').onclick = () => { $('#t-text').value = ''; typeKind = 'auto'; $$('#t-kinds button').forEach((x) => x.classList.toggle('on', x.dataset.k === 'auto')); show('type'); setTimeout(() => $('#t-text').focus(), 50); };
+  $('#btn-type').onclick = () => openType('entry');
+  $('#btn-inbox').onclick = () => { focusIdx = -1; show('list'); render(); };
+  $('#btn-week').onclick = () => { focusIdx = -1; show('week'); renderWeek(); };
+  $('#td-one').onclick = (e) => {
+    const yn = e.target.closest('[data-one]');
+    if (yn) { e.stopPropagation(); answerOne(yn.dataset.one === 'yes'); return; }
+    const d = day();
+    if (!d.one) { if (!isEvening()) openType('one'); return; }
+    if (isEvening() && d.one.done == null) { answerOne(true); return; } // wheel + click on the card = done
+    const it = oneThingItem(); if (it) { show('list'); openDetail(it.id); }
+  };
   $$('#t-kinds button').forEach((b) => b.onclick = () => { typeKind = b.dataset.k; $$('#t-kinds button').forEach((x) => x.classList.toggle('on', x === b)); });
   $('#t-save').onclick = async () => {
     const text = $('#t-text').value.trim(); if (!text) return goBack();
     const it = { id: newId(), created: new Date().toISOString(), status: 'recorded', text, kind: '', title: '', date: '', time: '' };
+    if (typeMode === 'one') {
+      Object.assign(it, heuristicParse(text), { kind: 'task', forceKind: 'task' });
+      items.unshift(it); setOneThing(it); await saveItems(); goBack(); runPipeline(); return;
+    }
     if (typeKind !== 'auto') it.forceKind = typeKind;
     // typed entries get sorted right away so they are useful offline; the AI refines them later
     const p = heuristicParse(text); Object.assign(it, p, typeKind !== 'auto' ? { kind: typeKind } : {});
@@ -563,6 +817,10 @@ function wire() {
     const it = items.find((i) => i.id === detailId); if (!it) return;
     if (!it.kind || it.status === 'recorded' || (it.status === 'error' && !it.kind)) { toast('Converting first…'); await runPipeline(true); return; }
     await sendToVault([it]); fillDetail();
+  };
+  $('#d-done').onclick = async () => {
+    const it = items.find((i) => i.id === detailId); if (!it || it.kind !== 'task') return;
+    setDone(it, !it.done); await saveItems(); await saveDays(); fillDetail(); render(); runPipeline();
   };
   $('#d-delete').onclick = async () => {
     const it = items.find((i) => i.id === detailId); if (!it) return;
@@ -585,10 +843,13 @@ function wire() {
 async function boot() {
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
   await loadState();
-  wire(); setNet(); render();
+  wire(); setNet(); show('today'); render();
   if (!cfg.gh || !cfg.groq) toast('Open ⚙ to finish setup');
   runPipeline();
+  // roll the Today screen over at midnight and switch to the evening view at 5 PM without a reload
+  let lastKey = todayKey(), lastEve = isEvening();
+  setInterval(() => { if (todayKey() !== lastKey || isEvening() !== lastEve) { lastKey = todayKey(); lastEve = isEvening(); render(); } }, 60000);
 }
-window.__capture = { heuristicParse, insertLine, lineFor, newFile, get items() { return items; } }; // for testing
+window.__capture = { heuristicParse, insertLine, lineFor, newFile, upsertDay, get items() { return items; }, get days() { return days; } }; // for testing
 boot();
 })();

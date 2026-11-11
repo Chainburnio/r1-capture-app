@@ -9,13 +9,43 @@
 <body>
 <div id="app">
 
-  <!-- LIST VIEW -->
-  <section id="view-list" class="view active">
+  <!-- TODAY VIEW (home) -->
+  <section id="view-today" class="view active">
     <header class="bar">
-      <span class="title">Capture</span>
+      <span class="title" id="td-date"></span>
       <span id="net" class="net" title="connection"></span>
-      <button id="btn-sync" class="icon-btn" aria-label="Sync now">⟳</button>
       <button id="btn-settings" class="icon-btn" aria-label="Settings">⚙</button>
+    </header>
+    <div class="today-body">
+      <div id="td-top" class="card"></div>
+      <div id="td-one" class="card one focusable" tabindex="-1"></div>
+      <div id="td-habits" class="habits"></div>
+    </div>
+    <footer class="bar foot">
+      <button id="btn-inbox" class="pill ghost focusable">Inbox</button>
+      <span class="hint">Hold to capture</span>
+      <button id="btn-week" class="pill ghost focusable">Week</button>
+    </footer>
+  </section>
+
+  <!-- WEEK VIEW -->
+  <section id="view-week" class="view">
+    <header class="bar">
+      <button class="icon-btn back" data-back>‹</button>
+      <span class="title">Last 7 days</span>
+    </header>
+    <div id="wk-body" class="detail-body"></div>
+    <footer class="bar foot">
+      <span class="hint">Hold to add a note</span>
+    </footer>
+  </section>
+
+  <!-- LIST VIEW (inbox) -->
+  <section id="view-list" class="view">
+    <header class="bar">
+      <button class="icon-btn back" data-back>‹</button>
+      <span class="title">Inbox</span>
+      <button id="btn-sync" class="icon-btn" aria-label="Sync now">⟳</button>
     </header>
     <nav class="tabs" id="tabs">
       <button data-f="all" class="on">All</button>
@@ -50,6 +80,7 @@
     </div>
     <footer class="bar foot">
       <button id="d-delete" class="pill danger">Delete</button>
+      <button id="d-done" class="pill ghost">Done</button>
       <button id="d-send" class="pill">Send</button>
     </footer>
   </section>
@@ -58,9 +89,10 @@
   <section id="view-type" class="view">
     <header class="bar">
       <button class="icon-btn back" data-back>‹</button>
-      <span class="title">New entry</span>
+      <span class="title" id="t-title">New entry</span>
     </header>
     <div class="type-body">
+      <div id="t-hint" class="t-hint"></div>
       <div class="kinds" id="t-kinds">
         <button data-k="auto" class="on">Auto</button>
         <button data-k="task">Task</button>
@@ -90,6 +122,8 @@
       <label>Folder in repo (blank = top)<input id="s-folder" autocomplete="off"></label>
       <label>GitHub token<input id="s-gh" type="password" autocomplete="off"></label>
       <label>Groq key<input id="s-groq" type="password" autocomplete="off"></label>
+      <label>Habits (up to 4, comma separated)<input id="s-habits" autocomplete="off"></label>
+      <label class="check"><input id="s-one" type="checkbox"> Ask for "today's one thing"</label>
       <label class="check"><input id="s-auto" type="checkbox"> Send to vault automatically</label>
       <button id="s-save" class="pill wide">Save</button>
       <button id="s-test" class="pill wide">Test connection</button>
