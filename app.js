@@ -3,7 +3,7 @@
 (() => {
 'use strict';
 
-const VERSION = '1.4.1';
+const VERSION = '1.5.0';
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
 const IS_R1 = typeof window.PluginMessageHandler !== 'undefined';
@@ -282,7 +282,7 @@ async function ghPut(path, text, sha, message) {
 
 const SECTIONS = { task: '## Tasks', event: '## Events', note: '## Notes' };
 function lineFor(it) {
-  const tag = ` ^r1-${it.id}`;
+  const tag = '';   // no visible id; lines are matched by their last written text
   const capT = new Date(it.created);
   const capClock = clock(`${pad(capT.getHours())}:${pad(capT.getMinutes())}`);
   // Formats match the vault: Tasks plugin (global filter #task, emoji dates) and the
@@ -303,8 +303,15 @@ function newFile(dateISO) {
   return `---\nsource: r1\ndate: ${mdy(dateISO)}\n---\n\n## Day\n\n## Tasks\n\n## Events\n\n## Notes\n`;
 }
 function insertLine(text, it) {
-  const tagRe = new RegExp(`^.*\\^r1-${it.id}[ \\t]*$`, 'm');
-  if (tagRe.test(text)) return text.replace(tagRe, lineFor(it)); // already there: keep it current (e.g. checked off)
+  const now = lineFor(it);
+  const lines0 = text.split('\n');
+  // older versions tagged lines with ^r1-<id>; replace those in place, without the tag
+  let idx = lines0.findIndex((l) => new RegExp(`\\^r1-${it.id}\\s*$`).test(l));
+  // otherwise find the line this item last wrote (e.g. before it was checked off)
+  if (idx < 0 && it.lastLine) idx = lines0.findIndex((l) => l.trimEnd() === it.lastLine);
+  if (idx < 0) idx = lines0.findIndex((l) => l.trimEnd() === now);
+  if (idx >= 0) { lines0[idx] = now; it.lastLine = now; return lines0.join('\n'); }
+  it.lastLine = now;
   const heading = SECTIONS[it.kind];
   const lines = text.replace(/\s+$/, '').split('\n');
   let h = lines.findIndex((l) => l.trim() === heading);
@@ -453,6 +460,13 @@ async function runPipeline(manual = false) {
           const c = await classify(it.text, it.created); p.title = c.title; p.date = c.date; p.time = c.time;
         }
         Object.assign(it, p);
+        // a date that already passed, with no year spoken, almost always means next year
+        if (it.date && /^\d{4}-\d{2}-\d{2}$/.test(it.date) && !/\b(19|20)\d{2}\b/.test(it.text)) {
+          const capDay = isoDate(new Date(it.created));
+          let [y, m, d2] = it.date.split('-').map(Number);
+          while (`${y}-${pad(m)}-${pad(d2)}` < capDay) y++;
+          it.date = `${y}-${pad(m)}-${pad(d2)}`;
+        }
         if (it.kind === 'note') {
           const clean = it.text.replace(/^note\b[\s,:.-]*/i, '');
           it.text = clean ? clean.charAt(0).toUpperCase() + clean.slice(1) : it.text;
