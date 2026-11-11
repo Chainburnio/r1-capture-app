@@ -3,7 +3,7 @@
 (() => {
 'use strict';
 
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
 const IS_R1 = typeof window.PluginMessageHandler !== 'undefined';
@@ -44,6 +44,13 @@ let items = [];          // newest first
 let cfg = { owner: '', repo: '', branch: 'main', folder: '', gh: '', groq: '', auto: true,
   habits: ['Workout', 'Eat well', 'Work done'], oneThing: true };
 let days = {};           // 'YYYY-MM-DD' -> { habits: {name: true}, one: {id, done: true|false|null}, dirty }
+let skills = [];         // { id, name, baseHours, goals: [{ id, text, due, doneAt }], created, dirty }
+let sessions = [];       // { id, skillId, at, minutes, source }
+let timer = null;        // { skillId, start }
+let skSel = 0;
+let skillId = null;
+let formMode = '';
+let formChoice = null;
 let filter = 'all';
 let sel = 0;
 let detailId = null;
@@ -58,6 +65,9 @@ const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2
 async function loadState() {
   try { items = JSON.parse(await store.get('items') || '[]'); } catch { items = []; }
   try { days = JSON.parse(await store.get('days') || '{}'); } catch { days = {}; }
+  try { skills = JSON.parse(await store.get('skills') || '[]'); } catch { skills = []; }
+  try { sessions = JSON.parse(await store.get('sessions') || '[]'); } catch { sessions = []; }
+  try { timer = JSON.parse(await store.get('timer') || 'null'); } catch { timer = null; }
   try { Object.assign(cfg, JSON.parse(await store.get('cfg') || '{}')); } catch {}
   cfg.gh = (await store.get('gh', true)) || cfg.gh || '';
   cfg.groq = (await store.get('groq', true)) || cfg.groq || '';
@@ -71,6 +81,7 @@ const saveDays = () => {
   keys.slice(0, Math.max(0, keys.length - 60)).forEach((k) => delete days[k]);
   return store.set('days', JSON.stringify(days));
 };
+const saveSkills = () => Promise.all([store.set('skills', JSON.stringify(skills)), store.set('sessions', JSON.stringify(sessions)), store.set('timer', JSON.stringify(timer))]);
 const todayKey = () => isoDate(new Date());
 function day(key = todayKey()) {
   if (!days[key]) days[key] = { habits: {}, one: null, dirty: false };
@@ -300,7 +311,7 @@ function insertLine(text, it) {
 }
 /* ----- the "## Day" wrap-up section, rewritten each time the day changes ----- */
 const habitKey = (h) => h.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
-const itemsOn = (key) => items.filter((i) => i.created && isoDate(new Date(i.created)) === key);
+const itemsOn = (key) => items.filter((i) => i.created && i.kind !== 'log' && isoDate(new Date(i.created)) === key);
 function nextEventAfter(key) {
   const now = new Date(); const nowKey = isoDate(now); const nowT = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
   return items.filter((i) => i.kind === 'event' && i.date && (i.date > key || (i.date === key && key === nowKey && (i.time || '99') >= nowT)))
@@ -326,6 +337,10 @@ function daySummary(key) {
     const pl = (c, w) => `${c} ${w}${c === 1 ? '' : 's'}`;
     lines.push(`- Captured ${its.length}: ${pl(n('task'), 'task')}, ${pl(n('event'), 'event')}, ${pl(n('note'), 'note')}${doneT ? `; ${pl(doneT, 'task')} done` : ''}`);
   }
+  const skMin = {};
+  sessions.filter((x) => isoDate(new Date(x.at)) === key).forEach((x) => { skMin[x.skillId] = (skMin[x.skillId] || 0) + x.minutes; });
+  const skParts = Object.entries(skMin).map(([id, m]) => { const sk = skillById(id); return sk ? `[[${skillPath(sk).replace(/\.md$/, '').split('/').pop()}|${sk.name}]] ${fmtMin(m)} (Lv ${levelOf(skillHours(sk))})` : null; }).filter(Boolean);
+  if (skParts.length) lines.push(`- Skills: ${skParts.join(', ')}`);
   const nx = nextEventAfter(key);
   if (nx) lines.push(`- Next up: ${[mdy(nx.date), clock(nx.time)].filter(Boolean).join(' ')} ${nx.title}`);
   return lines.length ? lines.join('\n') : '- Nothing logged';
@@ -418,6 +433,14 @@ async function runPipeline(manual = false) {
           it.text = await transcribe(it);
           if (!it.text) { it.text = '(nothing heard)'; }
         }
+        const lg = !it.forceKind && !it.oneThing ? parseLog(it.text) : null;
+        if (lg) {
+          const sk = skillById(lg.skillId);
+          Object.assign(it, { kind: 'log', title: `Logged ${fmtMin(lg.minutes)} to ${sk.name}`, status: 'synced', syncedAt: new Date().toISOString() });
+          await store.del('audio_' + it.id); await saveItems();
+          await addSession(lg.skillId, lg.minutes, 'voice', it.created);
+          continue;
+        }
         const p = it.forceKind ? { ...heuristicParse(it.text, new Date(it.created)), kind: it.forceKind } : await classify(it.text, it.created);
         if (it.forceKind && IS_R1 && it.forceKind !== 'note') {
           const c = await classify(it.text, it.created); p.title = c.title; p.date = c.date; p.time = c.time;
@@ -445,6 +468,10 @@ async function runPipeline(manual = false) {
     // 3. day wrap-up section (habits, one thing, counts) -> vault
     if (cfg.gh && cfg.owner && cfg.repo && Object.values(days).some((d) => d.dirty)) {
       try { await syncDays(); } catch (e) { if (!isNetErr(e)) toast(e.message); }
+    }
+    // 4. skill notes -> vault
+    if (cfg.gh && cfg.owner && cfg.repo && skills.some((x) => x.dirty)) {
+      try { await syncSkills(); } catch (e) { if (!isNetErr(e)) toast(e.message); }
     }
   } finally { busy = false; setNet(); render(); }
 }
@@ -556,6 +583,11 @@ function renderToday() {
     top.innerHTML = (evs.length ? evs.map((e) => `<div class="ln">${esc(clock(e.time) || 'Today')} ${esc(e.title)}</div>`).join('') : '<div class="ln muted">No events today</div>') +
       `<div class="ln muted">${tasksN} open task${tasksN === 1 ? '' : 's'}</div>`;
   }
+  if (timer && skillById(timer.skillId)) {
+    const tl = document.createElement('div'); tl.className = 'ln'; tl.innerHTML = '<b>●</b> ';
+    tl.appendChild(document.createTextNode(`${skillById(timer.skillId).name} · ${fmtMin(timerMinutes())}`));
+    top.prepend(tl); if (top.children.length > 3) top.lastChild.remove();
+  }
   // one thing
   const one = $('#td-one'); one.className = 'card one focusable';
   if (!cfg.oneThing) { one.style.display = 'none'; }
@@ -591,6 +623,243 @@ function activateFocused() {
   const el = focusables()[focusIdx]; if (el) el.click();
 }
 
+/* ---------- skills ---------- */
+// Level n needs n² total hours: level 1 at 1 h, 10 at 100 h, 30 at 900 h, 100 (mastery) at 10,000 h.
+const MAX_LEVEL = 100;
+const levelOf = (h) => Math.min(MAX_LEVEL, Math.floor(Math.sqrt(Math.max(0, h) + 1e-9)));
+const skillHours = (s) => (s.baseHours || 0) + sessions.filter((x) => x.skillId === s.id).reduce((n, x) => n + x.minutes, 0) / 60;
+const fmtH = (h) => h < 1 ? `${Math.round(h * 60)} min` : `${(Math.round(h * 10) / 10).toLocaleString()} h`;
+const fmtMin = (m) => m < 60 ? `${m} min` : `${Math.floor(m / 60)} h${m % 60 ? ' ' + (m % 60) + ' min' : ''}`;
+function levelInfo(s) {
+  const h = skillHours(s); const lv = levelOf(h);
+  if (lv >= MAX_LEVEL) return { h, lv, pct: 100, toNext: 0 };
+  const lo = lv * lv, hi = (lv + 1) * (lv + 1);
+  return { h, lv, pct: Math.max(0, Math.min(100, ((h - lo) / (hi - lo)) * 100)), toNext: hi - h };
+}
+const skillById = (id) => skills.find((s) => s.id === id);
+
+async function addSession(sid, minutes, source, atISO = new Date().toISOString()) {
+  const s = skillById(sid); if (!s || minutes < 1) return;
+  const before = levelOf(skillHours(s));
+  sessions.push({ id: newId(), skillId: sid, at: atISO, minutes: Math.round(minutes), source });
+  s.dirty = true; markDay(isoDate(new Date(atISO)));
+  await saveSkills(); await saveDays();
+  const after = levelOf(skillHours(s));
+  if (after > before) celebrate(s, before, after); else toast(`${fmtMin(Math.round(minutes))} logged to ${s.name}`);
+  render();
+  clearTimeout(addSession.t); addSession.t = setTimeout(() => runPipeline(), 3000);
+}
+const timerMinutes = () => timer ? Math.floor((Date.now() - timer.start) / 60000) : 0;
+async function startTimer(sid) {
+  if (timer && timer.skillId === sid) return stopTimer();
+  if (timer) await stopTimer();
+  timer = { skillId: sid, start: Date.now() }; await saveSkills();
+  toast(`Timer started: ${skillById(sid).name}`); render();
+}
+async function stopTimer() {
+  if (!timer) return;
+  const t = timer; timer = null; await saveSkills();
+  let m = Math.floor((Date.now() - t.start) / 60000);
+  if (m < 1) { toast('Under a minute, not logged'); render(); return; }
+  if (m > 600) { m = 600; toast('Capped at 10 hours'); }
+  await addSession(t.skillId, m, 'timer', new Date(t.start).toISOString());
+}
+
+/* level-up moment: big number, a burst, and a short chiptune */
+function chime() {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+    const ac = chime.ac || (chime.ac = new AC()); if (ac.state === 'suspended') ac.resume();
+    const t0 = ac.currentTime + 0.02;
+    [523.25, 659.25, 783.99, 1046.5, 1318.5].forEach((f, i) => {
+      const o = ac.createOscillator(), g = ac.createGain();
+      o.type = 'square'; o.frequency.value = f;
+      const t = t0 + i * 0.09, len = i === 4 ? 0.45 : 0.12;
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.12, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + len);
+      o.connect(g).connect(ac.destination); o.start(t); o.stop(t + len + 0.02);
+    });
+  } catch {}
+}
+let lvT = null;
+function celebrate(s, from, to) {
+  const el = $('#lvup'); const burst = $('#lv-burst'); burst.innerHTML = '';
+  const colors = ['#ff5a1f', '#ffb347', '#ffd166', '#6fcf97', '#56ccf2', '#ffffff'];
+  for (let i = 0; i < 16; i++) {
+    const a = (i / 16) * Math.PI * 2 + Math.random() * 0.3, r = 80 + Math.random() * 50;
+    const p = document.createElement('i');
+    p.style.background = colors[i % colors.length];
+    p.style.setProperty('--dx', `${Math.cos(a) * r}px`); p.style.setProperty('--dy', `${Math.sin(a) * r}px`);
+    p.style.animationDelay = `${0.1 + Math.random() * 0.15}s`;
+    burst.appendChild(p);
+  }
+  $('#lv-skill').textContent = s.name;
+  $('#lv-sub').textContent = to >= MAX_LEVEL ? 'Mastered. 10,000 hours.' : (to - from > 1 ? `+${to - from} levels · ` : '') + `${fmtH(((to + 1) ** 2) - skillHours(s))} to level ${to + 1}`;
+  const num = $('#lv-num'); num.textContent = String(to);
+  el.classList.remove('on'); void el.offsetWidth; el.classList.add('on');
+  chime();
+  clearTimeout(lvT); lvT = setTimeout(() => el.classList.remove('on'), 3800);
+}
+const lvupShowing = () => $('#lvup').classList.contains('on');
+const closeLvup = () => { clearTimeout(lvT); $('#lvup').classList.remove('on'); };
+
+function renderSkills() {
+  const ul = $('#sk-list'); ul.innerHTML = '';
+  if (skSel >= skills.length) skSel = Math.max(0, skills.length - 1);
+  skills.forEach((s, i) => {
+    const li = document.createElement('li'); if (i === skSel) li.className = 'sel';
+    const L = levelInfo(s); const running = timer && timer.skillId === s.id;
+    li.innerHTML = `<div class="sk-top"><span class="sk-name"></span><span class="sk-lv">Lv ${L.lv}</span></div>` +
+      `<div class="bar-track"><div class="bar-fill" style="width:${L.pct}%"></div></div>` +
+      `<div class="sk-sub"><span class="${running ? 'run' : ''}">${running ? '● ' + fmtMin(timerMinutes()) + ' running' : fmtH(L.h)}</span><span>${L.lv >= MAX_LEVEL ? 'Mastered' : fmtH(L.toNext) + ' to ' + (L.lv + 1)}</span></div>`;
+    li.querySelector('.sk-name').textContent = s.name;
+    li.onclick = () => { skSel = i; openSkill(s.id); };
+    ul.appendChild(li);
+  });
+  $('#sk-empty').style.display = skills.length ? 'none' : 'block';
+  ul.style.display = skills.length ? 'block' : 'none';
+  const sel = ul.querySelector('.sel'); if (sel) sel.scrollIntoView({ block: 'nearest' });
+}
+function openSkill(id) { skillId = id; renderSkill(); show('skill'); }
+function renderSkill() {
+  const s = skillById(skillId); if (!s) { show('skills'); renderSkills(); return; }
+  const L = levelInfo(s); const running = timer && timer.skillId === s.id;
+  $('#sd-name').textContent = s.name;
+  $('#sd-lv').textContent = `Lv ${L.lv}`;
+  $('#sd-hours').textContent = `${fmtH(L.h)} total`;
+  $('#sd-bar').style.width = L.pct + '%';
+  $('#sd-next').textContent = L.lv >= MAX_LEVEL ? 'Mastered' : `${fmtH(L.toNext)} to level ${L.lv + 1}`;
+  const tb = $('#sd-timer'); tb.classList.toggle('running', !!running);
+  tb.textContent = running ? `Stop · ${fmtMin(timerMinutes())}` : 'Start timer';
+  const ul = $('#sd-goals'); ul.innerHTML = '';
+  if (!s.goals.length) { const li = document.createElement('li'); li.innerHTML = '<span class="gt" style="color:#777">No goals yet. Add one with a clear finish line.</span>'; ul.appendChild(li); }
+  s.goals.forEach((g) => {
+    const li = document.createElement('li'); if (g.doneAt) li.className = 'done';
+    li.innerHTML = `<span class="ck">${g.doneAt ? '🏆' : '☐'}</span><span class="gt"></span>`;
+    const gt = li.querySelector('.gt'); gt.textContent = g.text;
+    const sub = document.createElement('span'); sub.className = 'gd';
+    sub.textContent = g.doneAt ? `Finished ${mdy(isoDate(new Date(g.doneAt)))}` : g.due ? `By ${mdy(g.due)}` : 'No deadline';
+    gt.appendChild(sub);
+    li.onclick = () => toggleGoal(s, g);
+    ul.appendChild(li);
+  });
+}
+async function toggleGoal(s, g) {
+  g.doneAt = g.doneAt ? null : new Date().toISOString();
+  s.dirty = true; markDay(); await saveSkills(); await saveDays(); renderSkill();
+  if (g.doneAt) { toast('🏆 Goal finished'); chime(); }
+  clearTimeout(addSession.t); addSession.t = setTimeout(() => runPipeline(), 3000);
+}
+
+/* new skill / new goal form */
+const PAST_HOURS = [0, 10, 50, 100, 500, 1000, 2500, 5000];
+const DUE_CHOICES = [['None', 0], ['1 month', 1], ['3 months', 3], ['6 months', 6], ['1 year', 12]];
+function openForm(mode) {
+  formMode = mode; formChoice = mode === 'skill' ? 0 : 0;
+  $('#f-text').value = '';
+  const ex = $('#f-extra'); ex.innerHTML = '';
+  const chips = document.createElement('div'); chips.className = 'chips';
+  if (mode === 'skill') {
+    $('#f-title').textContent = 'New skill'; $('#f-lbl1').textContent = 'Name (drawing, guitar, pest control…)';
+    const l = document.createElement('label'); l.className = 'f-lbl'; l.textContent = 'Hours already put in (rough is fine)'; ex.appendChild(l);
+    PAST_HOURS.forEach((h) => { const b = document.createElement('button'); b.textContent = h.toLocaleString(); b.dataset.v = h; chips.appendChild(b); });
+  } else {
+    $('#f-title').textContent = 'New goal'; $('#f-lbl1').textContent = 'A clear finish line (done or not done)';
+    const l = document.createElement('label'); l.className = 'f-lbl'; l.textContent = 'Deadline'; ex.appendChild(l);
+    DUE_CHOICES.forEach(([t, v]) => { const b = document.createElement('button'); b.textContent = t; b.dataset.v = v; chips.appendChild(b); });
+  }
+  ex.appendChild(chips);
+  const mark = () => chips.querySelectorAll('button').forEach((b) => b.classList.toggle('on', Number(b.dataset.v) === formChoice));
+  chips.querySelectorAll('button').forEach((b) => b.onclick = () => { formChoice = Number(b.dataset.v); mark(); });
+  mark(); show('form'); setTimeout(() => $('#f-text').focus(), 50);
+}
+async function saveForm() {
+  const text = $('#f-text').value.trim(); if (!text) { toast('Type a name first'); return; }
+  if (formMode === 'skill') {
+    if (skills.some((s) => s.name.toLowerCase() === text.toLowerCase())) { toast('You already have that skill'); return; }
+    const s = { id: newId(), name: text, baseHours: formChoice || 0, goals: [], created: new Date().toISOString(), dirty: true };
+    skills.push(s); skSel = skills.length - 1; await saveSkills();
+    show('skills'); render();
+    if (s.baseHours) toast(`${s.name} starts at level ${levelOf(s.baseHours)}`);
+  } else {
+    const s = skillById(skillId); if (!s) return;
+    let due = '';
+    if (formChoice) { const d = new Date(); d.setMonth(d.getMonth() + formChoice); due = isoDate(d); }
+    s.goals.push({ id: newId(), text, due, doneAt: null }); s.dirty = true; await saveSkills();
+    show('skill'); renderSkill();
+  }
+  runPipeline();
+}
+
+/* voice logging: "drew for an hour", "45 minutes of guitar" */
+function parseDuration(text) {
+  const t = text.toLowerCase();
+  let m = 0;
+  const hm = t.match(/(\d+(?:\.\d+)?|an?|one|two|three|four|five|six|half an?)\s*(?:and a half\s*)?(hours?|hrs?|h\b)/);
+  const mm = t.match(/(\d+)\s*(minutes?|mins?|m\b)/);
+  const words = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, 'half a': 0.5, 'half an': 0.5 };
+  if (hm) { let v = isNaN(Number(hm[1])) ? words[hm[1]] : Number(hm[1]); if (/and a half/.test(hm[0]) || /(hours?|hrs?)\s+and a half/.test(t)) v += 0.5; m += v * 60; }
+  if (mm) m += Number(mm[1]);
+  return Math.round(m);
+}
+function matchSkill(text) {
+  const t = text.toLowerCase();
+  let best = null, score = 0;
+  for (const s of skills) {
+    const n = s.name.toLowerCase();
+    let sc = t.includes(n) ? 10 : 0;
+    const stem = n.replace(/(ing|s)$/, '');
+    if (!sc && stem.length >= 3 && t.includes(stem)) sc = 6;          // "drew"/"draw" vs "drawing" handled below
+    if (!sc && /^draw/.test(n) && /\bdrew\b/.test(t)) sc = 6;
+    if (sc > score) { score = sc; best = s; }
+  }
+  return best;
+}
+function parseLog(text) {
+  if (!skills.length) return null;
+  const minutes = parseDuration(text); if (!minutes) return null;
+  const s = matchSkill(text); if (!s) return null;
+  if (!/\b(for|of|on|spent|practiced|worked|did|logged|drew|played|studied)\b/i.test(text)) return null;
+  return { skillId: s.id, minutes };
+}
+
+function skillFile(s) {
+  const L = levelInfo(s);
+  const lines = ['---', 'type: skill', `level: ${L.lv}`, `hours: ${Math.round(L.h * 10) / 10}`, `updated: ${mdy(todayKey())}`, '---', '',
+    `# ${s.name}`, '', `Level ${L.lv} · ${fmtH(L.h)}${L.lv >= MAX_LEVEL ? ' · Mastered' : ` · ${fmtH(L.toNext)} to level ${L.lv + 1}`}`, '',
+    '%% This file is rewritten by Capture on the r1. Edit goals on the device. %%', '', '## Goals'];
+  if (!s.goals.length) lines.push('- No goals yet');
+  s.goals.forEach((g) => lines.push(`- [${g.doneAt ? 'x' : ' '}] ${g.text}${g.doneAt ? ` (finished ${mdy(isoDate(new Date(g.doneAt)))})` : g.due ? ` (by ${mdy(g.due)})` : ''}`));
+  lines.push('', '## Log', '', '| Date | Time |', '| --- | --- |');
+  const byDay = {};
+  sessions.filter((x) => x.skillId === s.id).forEach((x) => { const k = isoDate(new Date(x.at)); byDay[k] = (byDay[k] || 0) + x.minutes; });
+  const keys = Object.keys(byDay).sort().reverse();
+  keys.forEach((k) => lines.push(`| ${mdy(k)} | ${fmtMin(byDay[k])} |`));
+  if (s.baseHours) lines.push(`| Before tracking | ${fmtH(s.baseHours)} |`);
+  return lines.join('\n') + '\n';
+}
+const skillPath = (s) => {
+  const folder = (cfg.folder || '').replace(/^\/+|\/+$/g, '');
+  const name = s.name.replace(/[\\/:*?"<>|#^[\]]/g, '').trim() || 'Skill';
+  return (folder ? folder + '/' : '') + `Skills/${name}.md`;
+};
+async function syncSkills() {
+  for (const s of skills.filter((x) => x.dirty)) {
+    const path = skillPath(s);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const { text, sha } = await ghGet(path);
+        const out = skillFile(s);
+        if (out !== text) await ghPut(path, out, sha, `r1: ${s.name} level ${levelOf(skillHours(s))}`);
+        s.dirty = false; break;
+      } catch (e) {
+        if ((e.status === 409 || e.status === 422) && attempt < 2) continue;
+        throw e;
+      }
+    }
+    await saveSkills();
+  }
+}
+
 function renderWeek() {
   const body = $('#wk-body'); body.innerHTML = '';
   const keys = []; for (let i = 6; i >= 0; i--) { const t = new Date(); t.setDate(t.getDate() - i); keys.push(isoDate(t)); }
@@ -604,13 +873,20 @@ function renderWeek() {
     const set = keys.filter((k) => days[k] && days[k].one);
     row('One thing done', keys.map((k) => !!(days[k] && days[k].one && days[k].one.done === true)), set.length || 0);
   }
+  const since = new Date(keys[0] + 'T00:00:00');
+  skills.forEach((s) => {
+    const m = sessions.filter((x) => x.skillId === s.id && new Date(x.at) >= since).reduce((n, x) => n + x.minutes, 0);
+    if (!m) return;
+    const r = document.createElement('div'); r.className = 'wk-row'; r.innerHTML = '<span></span><span></span>';
+    r.firstChild.textContent = s.name; r.lastChild.textContent = fmtMin(m); body.appendChild(r);
+  });
   const cap = keys.reduce((n, k) => n + itemsOn(k).length, 0);
   const r = document.createElement('div'); r.className = 'wk-row'; r.innerHTML = '<span>Captured</span><span></span>';
   r.lastChild.textContent = String(cap); body.appendChild(r);
 }
 
 /* ---------- UI ---------- */
-const ICON = { task: '☐', event: '◷', note: '✎' };
+const ICON = { task: '☐', event: '◷', note: '✎', log: '⏱' };
 const STATUS_TXT = { recorded: 'Waiting for connection', processing: 'Working…', ready: 'Ready to send', synced: 'In vault', error: 'Needs attention' };
 const visible = () => items.filter((i) => filter === 'all' || i.kind === filter);
 
@@ -643,6 +919,8 @@ function render() {
   if (detailId && currentViewIs('detail')) fillDetail();
   if (currentViewIs('today')) renderToday();
   if (currentViewIs('week')) renderWeek();
+  if (currentViewIs('skills')) renderSkills();
+  if (currentViewIs('skill')) renderSkill();
   const inb = $('#btn-inbox'); if (inb) inb.textContent = waiting + ready + err ? `Inbox · ${waiting + ready + err}` : 'Inbox';
 }
 function setNet() {
@@ -677,6 +955,9 @@ function toast(msg) {
 }
 
 function goBack() {
+  if (lvupShowing()) { closeLvup(); return; }
+  if (currentViewIs('skill')) { show('skills'); render(); return; }
+  if (currentViewIs('form')) { show(formMode === 'goal' ? 'skill' : 'skills'); render(); return; }
   const toList = currentViewIs('detail') || (currentViewIs('type') && typeMode === 'entry');
   show(toList ? 'list' : 'today');
   detailId = null; typeMode = 'entry'; stopScan(); focusIdx = -1; render();
@@ -751,11 +1032,16 @@ async function testConnection() {
 
 /* ---------- input wiring ---------- */
 function moveSel(d) {
+  if (lvupShowing()) return;
+  if (currentViewIs('skills')) { if (!skills.length) return; skSel = Math.min(skills.length - 1, Math.max(0, skSel + d)); renderSkills(); return; }
   if (currentViewIs('today')) { const n = focusables().length; if (!n) return; focusIdx = focusIdx < 0 ? (d > 0 ? 0 : n - 1) : Math.min(n - 1, Math.max(0, focusIdx + d)); applyFocus(); }
   else if (currentViewIs('list')) { const n = visible().length; if (!n) return; sel = Math.min(n - 1, Math.max(0, sel + d)); render(); }
   else { const body = document.querySelector('.view.active .detail-body, .view.active .settings-body, .view.active .type-body'); if (body) body.scrollTop += d * 40; }
 }
 function sideClick() {
+  if (lvupShowing()) { closeLvup(); return; }
+  if (currentViewIs('skills')) { const sk = skills[skSel]; if (sk) startTimer(sk.id); return; }
+  if (currentViewIs('skill')) { if (skillId) startTimer(skillId); return; }
   if (currentViewIs('today')) { if (focusIdx >= 0) activateFocused(); }
   else if (currentViewIs('list')) { const it = visible()[sel]; if (it) openDetail(it.id); }
   else if (!currentViewIs('type')) goBack();
@@ -786,6 +1072,22 @@ function wire() {
   $('#btn-type').onclick = () => openType('entry');
   $('#btn-inbox').onclick = () => { focusIdx = -1; show('list'); render(); };
   $('#btn-week').onclick = () => { focusIdx = -1; show('week'); renderWeek(); };
+  $('#btn-skills').onclick = () => { focusIdx = -1; show('skills'); renderSkills(); };
+  $('#btn-addskill').onclick = () => openForm('skill');
+  $('#sd-addgoal').onclick = () => openForm('goal');
+  $('#f-save').onclick = saveForm;
+  $('#f-text').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); saveForm(); } });
+  $('#sd-timer').onclick = () => skillId && startTimer(skillId);
+  $$('.quick button').forEach((b) => b.onclick = () => skillId && addSession(skillId, Number(b.dataset.min), 'manual'));
+  $('#lvup').onclick = closeLvup;
+  $('#sd-delete').onclick = async () => {
+    const btn = $('#sd-delete'); const s = skillById(skillId); if (!s) return;
+    if (btn.dataset.confirm !== s.id) { btn.dataset.confirm = s.id; btn.textContent = 'Tap again to delete'; setTimeout(() => { btn.dataset.confirm = ''; btn.textContent = 'Delete skill'; }, 2500); return; }
+    btn.dataset.confirm = ''; btn.textContent = 'Delete skill';
+    if (timer && timer.skillId === s.id) timer = null;
+    skills = skills.filter((x) => x.id !== s.id); sessions = sessions.filter((x) => x.skillId !== s.id);
+    await saveSkills(); toast('Skill removed from r1 (its vault note stays)'); show('skills'); render();
+  };
   $('#td-one').onclick = (e) => {
     const yn = e.target.closest('[data-one]');
     if (yn) { e.stopPropagation(); answerOne(yn.dataset.one === 'yes'); return; }
@@ -848,8 +1150,9 @@ async function boot() {
   runPipeline();
   // roll the Today screen over at midnight and switch to the evening view at 5 PM without a reload
   let lastKey = todayKey(), lastEve = isEvening();
-  setInterval(() => { if (todayKey() !== lastKey || isEvening() !== lastEve) { lastKey = todayKey(); lastEve = isEvening(); render(); } }, 60000);
+  setInterval(() => { if (timer || todayKey() !== lastKey || isEvening() !== lastEve) { lastKey = todayKey(); lastEve = isEvening(); render(); } }, timer ? 20000 : 60000);
+  setInterval(() => { if (timer) render(); }, 20000);
 }
-window.__capture = { heuristicParse, insertLine, lineFor, newFile, upsertDay, get items() { return items; }, get days() { return days; } }; // for testing
+window.__capture = { heuristicParse, insertLine, lineFor, newFile, upsertDay, parseLog, levelOf, get skills() { return skills; }, get sessions() { return sessions; }, get items() { return items; }, get days() { return days; } }; // for testing
 boot();
 })();

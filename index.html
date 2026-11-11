@@ -21,10 +21,60 @@
       <div id="td-one" class="card one focusable" tabindex="-1"></div>
       <div id="td-habits" class="habits"></div>
     </div>
-    <footer class="bar foot">
+    <footer class="bar foot three">
       <button id="btn-inbox" class="pill ghost focusable">Inbox</button>
-      <span class="hint">Hold to capture</span>
+      <button id="btn-skills" class="pill ghost focusable">Skills</button>
       <button id="btn-week" class="pill ghost focusable">Week</button>
+    </footer>
+  </section>
+
+  <!-- SKILLS LIST -->
+  <section id="view-skills" class="view">
+    <header class="bar">
+      <button class="icon-btn back" data-back>‹</button>
+      <span class="title">Skills</span>
+    </header>
+    <ul id="sk-list"></ul>
+    <div id="sk-empty" class="empty">Add something you want to get better at: a hobby or a work skill.</div>
+    <footer class="bar foot">
+      <span class="hint">Click: start / stop timer</span>
+      <button id="btn-addskill" class="pill">+ Skill</button>
+    </footer>
+  </section>
+
+  <!-- SKILL DETAIL -->
+  <section id="view-skill" class="view">
+    <header class="bar">
+      <button class="icon-btn back" data-back>‹</button>
+      <span class="title" id="sd-name"></span>
+    </header>
+    <div class="detail-body">
+      <div class="sd-level"><span id="sd-lv"></span><span id="sd-hours"></span></div>
+      <div class="bar-track"><div id="sd-bar" class="bar-fill"></div></div>
+      <div id="sd-next" class="sd-next"></div>
+      <button id="sd-timer" class="pill wide"></button>
+      <div class="quick"><button data-min="15">+15m</button><button data-min="30">+30m</button><button data-min="60">+1h</button></div>
+      <div class="sd-h">Goals</div>
+      <ul id="sd-goals"></ul>
+      <button id="sd-addgoal" class="pill ghost wide">+ Goal</button>
+      <button id="sd-delete" class="pill danger wide">Delete skill</button>
+    </div>
+  </section>
+
+  <!-- NEW SKILL / NEW GOAL -->
+  <section id="view-form" class="view">
+    <header class="bar">
+      <button class="icon-btn back" data-back>‹</button>
+      <span class="title" id="f-title"></span>
+    </header>
+    <div class="type-body">
+      <label class="f-lbl" id="f-lbl1"></label>
+      <input id="f-text" autocomplete="off">
+      <div id="f-extra"></div>
+    </div>
+    <footer class="bar foot">
+      <span></span>
+      <button id="f-save" class="pill">Save</button>
     </footer>
   </section>
 
@@ -136,6 +186,15 @@
     <div class="rec-dot"></div>
     <div id="rec-time">0:00</div>
     <div class="rec-hint">Release to save</div>
+  </div>
+
+  <!-- LEVEL UP -->
+  <div id="lvup" class="lvup">
+    <div class="lv-burst" id="lv-burst"></div>
+    <div class="lv-cap">LEVEL UP</div>
+    <div class="lv-num" id="lv-num">1</div>
+    <div class="lv-skill" id="lv-skill"></div>
+    <div class="lv-sub" id="lv-sub"></div>
   </div>
 
   <div id="toast" class="toast"></div>
