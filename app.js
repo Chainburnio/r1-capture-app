@@ -3,7 +3,7 @@
 (() => {
 'use strict';
 
-const VERSION = '1.6.0';
+const VERSION = '1.7.0';
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
 const IS_R1 = typeof window.PluginMessageHandler !== 'undefined';
@@ -116,20 +116,37 @@ const DAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 
 /* ---------- offline fallback parser ---------- */
+/* Spoken intent: "note to self…", "make a note that…", "remind me to…", "put on my calendar…".
+   Looked for in the first few words (after filler like "okay", "so"), then removed from the text. */
+const FILLER = String.raw`(?:(?:ok(?:ay)?|so|um+|uh+|hey|alright|all right|yeah|right|and|please|quick(?:ly)?)[\s,.!-]+)*`;
+const INTENTS = [
+  ['note', String.raw`(?:(?:make|take|add|write|create|jot)(?:\s+down)?\s+(?:a\s+)?(?:quick\s+)?note(?:\s+to\s+self)?(?:\s+(?:that|about|saying))?|note\s+to\s+self|new\s+note|quick\s+note|(?:jot|write)\s+(?:this\s+)?down|for\s+the\s+record|remember\s+that|note(?:\s+that)?)`],
+  ['task', String.raw`(?:(?:add|create|make)\s+(?:a\s+)?(?:new\s+)?(?:task|to\s?do)(?:\s+to)?|new\s+task|to\s?do|task(?:\s+to)?|remind\s+me\s+to|remind\s+me|reminder\s+to|reminder|(?:i\s+)?need\s+to|(?:i\s+)?have\s+to|i\s+gotta|i've\s+got\s+to|don't\s+forget\s+to|remember\s+to)`],
+  ['event', String.raw`(?:(?:add|create|make|schedule)\s+(?:an?\s+)?(?:new\s+)?event(?:\s+for)?|new\s+event|event|put\s+(?:this\s+|it\s+)?on\s+(?:my\s+)?calendar|on\s+my\s+calendar|calendar|schedule(?:\s+(?:a|an))?)`]
+];
+function detectIntent(text) {
+  const t = text.trim();
+  for (const [kind, pat] of INTENTS) {
+    const m = t.match(new RegExp(`^${FILLER}${pat}\\b[\\s,:;.!-]*`, 'i'));
+    if (m) {
+      let rest = t.slice(m[0].length).trim();
+      if (!rest) return null;
+      rest = rest.charAt(0).toUpperCase() + rest.slice(1);
+      return { kind, text: rest };
+    }
+  }
+  return null;
+}
+
 function heuristicParse(text, base = new Date()) {
   let t = text.trim();
   const low = t.toLowerCase();
+  // Notes are the default. A task needs a clear "to do" phrase; an event needs a date plus a time or an appointment word.
   let kind = 'note';
-  const lead = low.match(/^(task|to ?do|event|note|reminder|remind me)\b[\s,:.-]*/);
-  if (lead) {
-    const w = lead[1];
-    kind = w === 'event' ? 'event' : w === 'note' ? 'note' : 'task';
-    t = t.slice(lead[0].length);
-  } else if (/\b(meeting|appointment|appt|dentist|doctor|call with|lunch with|dinner with|party|inspection at)\b/.test(low)) {
-    kind = 'event';
-  } else if (/\b(need to|have to|got to|gotta|don't forget|remember to|make sure|buy|pick up|call|email|send|order|schedule|follow up)\b/.test(low)) {
-    kind = 'task';
-  }
+  const intent = detectIntent(t);
+  if (intent) { kind = intent.kind; t = intent.text; }
+  const apptWord = /\b(meeting|appointment|appt|dentist|doctor|lunch with|dinner with|party|flight|interview|call with)\b/.test(low);
+  const todoWord = /^(?:\S+\s+){0,3}?(need to|have to|gotta|got to|don't forget to|remember to|make sure to)\b/.test(low);
 
   let date = '';
   const d = new Date(base);
@@ -156,9 +173,18 @@ function heuristicParse(text, base = new Date()) {
       date = isoDate(cand);
     }
   }
+  if (!date) {
+    const od = low.match(/\bthe\s+(\d{1,2})(?:st|nd|rd|th)\b/);
+    if (od) {
+      const cand = new Date(base.getFullYear(), base.getMonth(), Number(od[1]));
+      if (cand < new Date(base.getFullYear(), base.getMonth(), base.getDate())) cand.setMonth(cand.getMonth() + 1);
+      date = isoDate(cand);
+    }
+  }
   let time = '';
+  if (/\b(at\s+)?noon\b/.test(low)) time = '12:00';
   const tm = low.match(/\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\b/) || low.match(/\bat\s+(\d{1,2})(?::(\d{2}))?\b/);
-  if (tm) {
+  if (tm && !time) {
     let h = Number(tm[1]); const m = Number(tm[2] || 0);
     const ap = (tm[3] || '').replace(/\./g, '');
     if (ap === 'pm' && h < 12) h += 12;
@@ -166,7 +192,10 @@ function heuristicParse(text, base = new Date()) {
     if (!ap && h >= 1 && h <= 6) h += 12; // "at 3" almost always means afternoon
     if (h < 24 && m < 60) time = `${pad(h)}:${pad(m)}`;
   }
-  if (kind === 'note' && date && time) kind = 'event';
+  if (!intent) {
+    if (date && (time || apptWord)) kind = 'event';
+    else if (todoWord) kind = 'task';
+  }
   let title = t;
   if (date || time) {
     title = title
@@ -208,12 +237,16 @@ function extractJSON(data) {
 async function classify(text, createdISO) {
   const base = new Date(createdISO);
   const fallback = heuristicParse(text, base);
-  const forced = /^(task|to ?do|event|note|reminder|remind me)\b/i.test(text.trim()) ? fallback.kind : null;
+  const intent = detectIntent(text);
+  const forced = intent ? intent.kind : null;
   if (!IS_R1) return fallback;
   const today = `${DAYS[base.getDay()]} ${isoDate(base)}`;
   const prompt =
     `You sort quick voice memos into a task, an event, or a note. The memo was recorded on ${today} at ${pad(base.getHours())}:${pad(base.getMinutes())}.\n` +
-    `task = something to do. event = something happening at a date/time. note = anything else.\n` +
+    `note is the DEFAULT. Choose note unless the memo clearly says otherwise. Information, observations, codes, ideas, things someone said, and facts to remember are notes, even if they mention calling, sending or ordering.\n` +
+    `task = only when the speaker clearly tells themself to do something ("I need to", "remind me to", "don't forget to", or a direct command to themself).\n` +
+    `event = only when something happens on a specific day (and usually a time): appointments, meetings, flights, plans.\n` +
+    `If unsure, choose note.\n` +
     `Resolve relative dates ("tomorrow", "Friday") against the recording date. Leave date/time empty if not stated.\n` +
     `title = the memo cleaned up into a short line, keeping names, numbers and addresses exact. Drop words like "task" or "remind me".\n` +
     `Respond ONLY with JSON: {"kind":"task|event|note","title":"...","date":"YYYY-MM-DD or empty","time":"HH:MM 24h or empty"}\n` +
@@ -221,8 +254,10 @@ async function classify(text, createdISO) {
   try {
     const j = extractJSON(await askR1(prompt));
     if (!j || !['task', 'event', 'note'].includes(j.kind)) return fallback;
+    let kind = forced || j.kind;
+    if (!forced && kind === 'event' && !/^\d{4}-\d{2}-\d{2}$/.test(j.date || '')) kind = 'note'; // no date, not an event
     return {
-      kind: forced || j.kind,
+      kind,
       title: String(j.title || fallback.title).trim() || fallback.title,
       date: /^\d{4}-\d{2}-\d{2}$/.test(j.date || '') ? j.date : '',
       time: /^\d{2}:\d{2}$/.test(j.time || '') ? j.time : ''
@@ -491,7 +526,17 @@ async function runPipeline(manual = false) {
           it.text = await transcribe(it);
           if (!it.text) { it.text = '(nothing heard)'; }
         }
-        const lg = !it.forceKind && !it.oneThing ? parseLog(it.text) : null;
+        if (!it.oneThing && !it.intentDone) {
+          it.intentDone = true;
+          const spoken = detectIntent(it.text);
+          if (spoken) { it.text = spoken.text; it.forceKind = spoken.kind; }   // what you said wins
+          else if (it.screenKind) it.forceKind = it.screenKind;                // then the tab you were on
+        }
+        let lg = !it.forceKind && !it.oneThing ? parseLog(it.text) : null;
+        if (!lg && it.ctxSkill && !it.forceKind && skillById(it.ctxSkill)) {
+          const m = parseDuration(it.text);
+          if (m) lg = { skillId: it.ctxSkill, minutes: m };
+        }
         if (lg) {
           const sk = skillById(lg.skillId);
           Object.assign(it, { kind: 'log', title: `Logged ${fmtMin(lg.minutes)} to ${sk.name}`, status: 'synced', syncedAt: new Date().toISOString() });
@@ -555,14 +600,20 @@ async function sendToVault(list) {
 }
 
 /* ---------- recording ---------- */
+let recCtx = {};
 let rec = null, recChunks = [], recStart = 0, recTimer = null, recStream = null;
 function pickMime() {
   const opts = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
   return (window.MediaRecorder && opts.find((m) => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m))) || '';
 }
 async function startRec() {
-  if (rec || !(currentViewIs('list') || currentViewIs('today') || currentViewIs('week') || (currentViewIs('type') && typeMode === 'one'))) return;
+  if (rec || !(currentViewIs('list') || currentViewIs('today') || currentViewIs('week') || currentViewIs('skills') || currentViewIs('skill') || (currentViewIs('type') && typeMode === 'one'))) return;
   recForOne = currentViewIs('type') && typeMode === 'one';
+  // the screen you are on sets the type: Notes/Tasks/Events tab, or a skill to log time to
+  recCtx = {};
+  if (currentViewIs('list') && ['note', 'task', 'event'].includes(filter)) recCtx.kind = filter;
+  if (currentViewIs('skill') && skillId) recCtx.skillId = skillId;
+  if (currentViewIs('skills') && skills[skSel]) recCtx.skillId = skills[skSel].id;
   try {
     recStream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (e) { toast('Microphone not available: ' + (e.message || e.name)); return; }
@@ -593,8 +644,10 @@ async function finishRec() {
   const b64 = await new Promise((res) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(',')[1]); fr.readAsDataURL(blob); });
   const it = { id: newId(), created: new Date().toISOString(), status: 'recorded', mime, text: '', kind: '', title: '', date: '', time: '' };
   if (recForOne) { it.forceKind = 'task'; it.kind = 'task'; it.title = "Today's one thing"; }
+  else if (recCtx.kind) it.screenKind = recCtx.kind;
+  if (recCtx.skillId) it.ctxSkill = recCtx.skillId;
   await store.set('audio_' + it.id, b64);
-  items.unshift(it); filter = 'all'; sel = 0;
+  items.unshift(it); if (!recCtx.kind) filter = 'all'; sel = 0;
   if (recForOne) { setOneThing(it); recForOne = false; show('today'); }
   await saveItems(); render();
   toast(navigator.onLine ? 'Saved. Processing…' : 'Saved offline');
@@ -1032,12 +1085,12 @@ function goBack() {
   detailId = null; typeMode = 'entry'; stopScan(); focusIdx = -1; render();
 }
 function openType(mode) {
-  typeMode = mode; typeKind = 'auto'; $('#t-text').value = '';
+  typeMode = mode; typeKind = mode === 'entry' && ['note', 'task', 'event'].includes(filter) ? filter : 'auto'; $('#t-text').value = '';
   const one = mode === 'one';
   $('#t-title').textContent = one ? "Today's one thing" : 'New entry';
   $('#t-hint').textContent = one ? 'Hold the side button and say it, or type it.' : '';
   $('#t-kinds').style.display = one ? 'none' : '';
-  $$('#t-kinds button').forEach((x) => x.classList.toggle('on', x.dataset.k === 'auto'));
+  $$('#t-kinds button').forEach((x) => x.classList.toggle('on', x.dataset.k === typeKind));
   show('type');
   if (!one) setTimeout(() => $('#t-text').focus(), 50);
 }
