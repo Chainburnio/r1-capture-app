@@ -3,7 +3,7 @@
 (() => {
 'use strict';
 
-const VERSION = '1.5.0';
+const VERSION = '1.6.0';
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
 const IS_R1 = typeof window.PluginMessageHandler !== 'undefined';
@@ -77,14 +77,17 @@ async function loadState() {
   // anything stuck mid-processing after a restart goes back in the queue
   items.forEach((it) => { if (it.status === 'processing') it.status = it.kind ? 'ready' : 'recorded'; });
 }
-const saveItems = () => store.set('items', JSON.stringify(items));
+let backupDirty = false;
+let startedWithoutKeys = false;  // after a wipe: restore before the next backup can overwrite it
+const saveItems = () => { backupDirty = true; return store.set('items', JSON.stringify(items)); };
 const saveDays = () => {
   // keep about two months of day records on the device; the vault keeps everything
   const keys = Object.keys(days).sort();
   keys.slice(0, Math.max(0, keys.length - 60)).forEach((k) => delete days[k]);
+  backupDirty = true;
   return store.set('days', JSON.stringify(days));
 };
-const saveSkills = () => Promise.all([store.set('skills', JSON.stringify(skills)), store.set('sessions', JSON.stringify(sessions)), store.set('timer', JSON.stringify(timer))]);
+const saveSkills = () => (backupDirty = true, Promise.all([store.set('skills', JSON.stringify(skills)), store.set('sessions', JSON.stringify(sessions)), store.set('timer', JSON.stringify(timer))]));
 const todayKey = () => isoDate(new Date());
 function day(key = todayKey()) {
   if (!days[key]) days[key] = { habits: {}, one: null, dirty: false };
@@ -92,6 +95,7 @@ function day(key = todayKey()) {
 }
 const markDay = (key = todayKey()) => { day(key).dirty = true; };
 async function saveCfg() {
+  backupDirty = true;
   const { gh, groq, ...plain } = cfg;
   await store.set('cfg', JSON.stringify(plain));
   await store.set('gh', gh, true);
@@ -235,7 +239,7 @@ function b64ToBlob(b64, type) {
 async function transcribe(it) {
   if (!cfg.groq) throw new Error('Add a Groq key in Settings to turn voice into text');
   const b64 = await store.get('audio_' + it.id);
-  if (!b64) throw new Error('Audio is missing');
+  if (!b64) { const e = new Error('Recording was lost before it could be converted'); e.permanent = true; throw e; }
   const blob = b64ToBlob(b64, it.mime || 'audio/webm');
   const ext = (it.mime || '').includes('mp4') ? 'm4a' : (it.mime || '').includes('ogg') ? 'ogg' : 'webm';
   const fd = new FormData();
@@ -434,6 +438,46 @@ async function syncItems(list) {
   }
 }
 
+/* ---------- backup and restore (private notes repo, hidden .r1 folder) ---------- */
+const backupPath = () => { const f = (cfg.folder || '').replace(/^\/+|\/+$/g, ''); return (f ? f + '/' : '') + '.r1/backup.json'; };
+async function backupState() {
+  const { gh, groq, ...plainCfg } = cfg;
+  backupDirty = false;
+  const body = JSON.stringify({ v: 1, saved: new Date().toISOString(), cfg: plainCfg, items, days, skills, sessions, timer }, null, 1);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const { sha } = await ghGet(backupPath());
+      await ghPut(backupPath(), body, sha, 'r1: backup');
+      return true;
+    } catch (e) {
+      if ((e.status === 409 || e.status === 422) && attempt < 2) continue;
+      backupDirty = true; throw e;
+    }
+  }
+}
+const isEmpty = () => !items.length && !skills.length && !sessions.length && !Object.values(days).some((d) => Object.keys(d.habits || {}).length || d.one);
+async function restoreState() {
+  const { text } = await ghGet(backupPath());
+  if (!text) return 0;
+  const b = JSON.parse(text);
+  // keep anything made on the device since the wipe, and add the backup underneath it
+  const merge = (local, remote) => { const ids = new Set(local.map((x) => x.id)); return [...local, ...remote.filter((x) => !ids.has(x.id))]; };
+  const localDays = days;
+  items = merge(items, (b.items || []).map((i) => (i.status === 'processing' ? { ...i, status: i.kind ? 'ready' : 'recorded' } : i)))
+    .sort((x, y) => String(y.created).localeCompare(String(x.created)));
+  skills = merge(skills, b.skills || []); sessions = merge(sessions, b.sessions || []); timer = timer || b.timer || null;
+  days = b.days || {};
+  for (const [k, d] of Object.entries(localDays)) {
+    const r = days[k] || (days[k] = { habits: {}, one: null, dirty: false });
+    Object.assign(r.habits, d.habits || {}); if (d.one && !r.one) r.one = d.one; if (d.dirty) r.dirty = true;
+  }
+  if (b.cfg) ['habits', 'oneThing', 'auto'].forEach((k) => { if (b.cfg[k] !== undefined) cfg[k] = b.cfg[k]; });
+  await saveItems(); await saveDays(); await saveSkills(); await saveCfg();
+  backupDirty = false;
+  render();
+  return items.length + skills.length;
+}
+
 /* ---------- pipeline ---------- */
 async function runPipeline(manual = false) {
   if (busy) return;
@@ -493,6 +537,10 @@ async function runPipeline(manual = false) {
     // 4. skill notes -> vault
     if (cfg.gh && cfg.owner && cfg.repo && skills.some((x) => x.dirty)) {
       try { await syncSkills(); } catch (e) { if (!isNetErr(e)) toast(e.message); }
+    }
+    // 5. full backup of the app's data (the r1 can wipe a creation's storage on update)
+    if (cfg.gh && cfg.owner && cfg.repo && backupDirty) {
+      try { await backupState(); } catch (e) { /* retried next run */ }
     }
   } finally { busy = false; setNet(); render(); }
 }
@@ -1035,6 +1083,10 @@ async function loadSetupCode() {
     await saveCfg(); fillSettings(); $('#s-code').value = '';
     msg.textContent = 'Setup loaded and saved. Testing…';
     await testConnection();
+    if (isEmpty() || startedWithoutKeys) {
+      startedWithoutKeys = false;
+      try { const n = await restoreState(); if (n) msg.textContent += ` · Restored your data (${n} entries and skills)`; } catch (e) {}
+    }
     runPipeline();
   } catch (e) { msg.textContent = isNetErr(e) ? 'No connection. Connect to Wi-Fi and try again.' : 'Setup failed: ' + e.message; }
 }
@@ -1193,7 +1245,13 @@ async function boot() {
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
   await loadState();
   wire(); setNet(); show('today'); render();
-  if (!cfg.gh || !cfg.groq) toast('Open ⚙ to finish setup');
+  if (!cfg.gh || !cfg.groq) {
+    startedWithoutKeys = true;
+    fillSettings(); show('settings');
+    $('#s-msg').textContent = 'Enter your setup code to connect and restore your data.';
+  } else if (isEmpty()) {
+    try { const n = await restoreState(); if (n) toast('Restored from backup'); } catch (e) {}
+  }
   runPipeline();
   // roll the Today screen over at midnight and switch to the evening view at 5 PM without a reload
   let lastKey = todayKey(), lastEve = isEvening();

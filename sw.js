@@ -1,5 +1,5 @@
 // Keeps the app itself available with no connection. API calls are never cached.
-const CACHE = 'capture-v1.5.0';
+const CACHE = 'capture-v1.6.0';
 const SHELL = ['./', 'index.html', 'app.css', 'app.js'];
 
 self.addEventListener('install', (e) => {
