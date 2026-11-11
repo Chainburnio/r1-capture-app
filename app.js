@@ -3,7 +3,7 @@
 (() => {
 'use strict';
 
-const VERSION = '1.4.0';
+const VERSION = '1.4.1';
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
 const IS_R1 = typeof window.PluginMessageHandler !== 'undefined';
@@ -12,30 +12,33 @@ const IS_R1 = typeof window.PluginMessageHandler !== 'undefined';
 const b64e = (str) => btoa(unescape(encodeURIComponent(str)));
 const b64d = (b64) => decodeURIComponent(escape(atob(b64)));
 
+// Saves go to the r1's own storage. Secure storage is tried first for keys, but it is not
+// available on every r1 build, so every value is also kept in plain r1 storage and in the
+// browser's storage. Reads take the first copy found, so a value survives app restarts and updates.
 const store = {
   async get(key, secure = false) {
-    try {
-      const cs = window.creationStorage;
-      if (cs) {
-        const raw = await (secure ? cs.secure : cs.plain).getItem(key);
-        return raw == null ? null : b64d(raw);
-      }
-    } catch (e) { /* fall through */ }
-    return localStorage.getItem('cap_' + key);
+    const cs = window.creationStorage;
+    if (cs) {
+      if (secure) { try { const r = await cs.secure.getItem(key); if (r != null) return b64d(r); } catch (e) {} }
+      try { const r = await cs.plain.getItem(secure ? 'sec_' + key : key); if (r != null) return b64d(r); } catch (e) {}
+    }
+    try { return localStorage.getItem('cap_' + key); } catch (e) { return null; }
   },
   async set(key, value, secure = false) {
-    try {
-      const cs = window.creationStorage;
-      if (cs) { await (secure ? cs.secure : cs.plain).setItem(key, b64e(value)); return; }
-    } catch (e) { /* fall through */ }
-    localStorage.setItem('cap_' + key, value);
+    const cs = window.creationStorage;
+    if (cs) {
+      if (secure) { try { await cs.secure.setItem(key, b64e(value)); } catch (e) {} }
+      try { await cs.plain.setItem(secure ? 'sec_' + key : key, b64e(value)); } catch (e) {}
+    }
+    try { localStorage.setItem('cap_' + key, value); } catch (e) {}
   },
   async del(key, secure = false) {
-    try {
-      const cs = window.creationStorage;
-      if (cs) { await (secure ? cs.secure : cs.plain).removeItem(key); return; }
-    } catch (e) { /* fall through */ }
-    localStorage.removeItem('cap_' + key);
+    const cs = window.creationStorage;
+    if (cs) {
+      if (secure) { try { await cs.secure.removeItem(key); } catch (e) {} }
+      try { await cs.plain.removeItem(secure ? 'sec_' + key : key); } catch (e) {}
+    }
+    try { localStorage.removeItem('cap_' + key); } catch (e) {}
   }
 };
 
